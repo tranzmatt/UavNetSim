@@ -4,6 +4,7 @@ from pathlib import Path
 
 import numpy as np
 import trimesh
+from shapely.errors import GEOSException
 from shapely.geometry import Polygon
 from shapely.validation import make_valid
 
@@ -39,10 +40,24 @@ def _ground(scene: SceneModel):
 
 def _polygon(feature):
     points = [(point.x, point.y) for point in feature.footprint]
-    polygon = make_valid(Polygon(points))
-    if polygon.geom_type == "MultiPolygon":
-        polygon = max(polygon.geoms, key=lambda item: item.area)
-    if polygon.geom_type != "Polygon" or polygon.area < 0.5:
+    if len(set(points)) < 3:
+        raise ValueError(f"Feature {feature.id} has an invalid footprint")
+    try:
+        geometry = make_valid(Polygon(points))
+    except GEOSException as error:
+        raise ValueError(f"Feature {feature.id} has an invalid footprint") from error
+    polygons = []
+    pending = [geometry]
+    while pending:
+        item = pending.pop()
+        if item.geom_type == "Polygon":
+            polygons.append(item)
+        elif hasattr(item, "geoms"):
+            pending.extend(item.geoms)
+    if not polygons:
+        raise ValueError(f"Feature {feature.id} has an invalid footprint")
+    polygon = max(polygons, key=lambda item: item.area)
+    if polygon.is_empty or polygon.area <= 1e-6:
         raise ValueError(f"Feature {feature.id} has an invalid footprint")
     return polygon
 
@@ -90,6 +105,7 @@ def compile_scene(scene: SceneModel, output_directory, progress=None, osm2world_
         mesh_path.unlink()
     meshes = []
     materials = set()
+    skipped_mesh_features = []
     progress(0.02, "Creating ground mesh")
     _ground(scene).export(mesh_directory / "ground.ply", file_type="ply")
     meshes.append(("meshes/ground.ply", "ground-material", "mesh-ground"))
@@ -101,7 +117,15 @@ def compile_scene(scene: SceneModel, output_directory, progress=None, osm2world_
     for index, feature in enumerate(compiled_features):
         material = feature.material if feature.material in ITU_TYPES else "itu_concrete"
         mesh_path = mesh_directory / f"{feature.category}-{index}.ply"
-        mesh = _volume_mesh(feature) if feature.category == "building" else _surface_mesh(feature)
+        try:
+            mesh = _volume_mesh(feature) if feature.category == "building" else _surface_mesh(feature)
+        except (ValueError, GEOSException) as error:
+            skipped_mesh_features.append({"id": feature.id, "reason": str(error)})
+            progress(
+                0.05 + 0.85 * (index + 1) / max(1, len(compiled_features)),
+                f"Skipping invalid {feature.category} feature {feature.id}",
+            )
+            continue
         mesh.export(mesh_path, file_type="ply")
         materials.add(material)
         meshes.append((f"meshes/{mesh_path.name}", material, f"mesh-{feature.category}-{index}"))
@@ -129,6 +153,7 @@ def compile_scene(scene: SceneModel, output_directory, progress=None, osm2world_
         "building_count": sum(feature.category == "building" for feature in scene.features),
         "terrain_count": sum(feature.category == "terrain" for feature in scene.features),
         "water_count": sum(feature.category == "water" for feature in scene.features),
+        "skipped_mesh_features": skipped_mesh_features,
         "terrain_mesh": {
             "rows": scene.terrain.rows,
             "columns": scene.terrain.columns,
