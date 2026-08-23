@@ -21,4 +21,3 @@ tools/osm2world/LICENSE.txt
 tools/osm2world/standard.properties
 tools/osm2world/osm2world-windows.bat
 tools/osm2world/osm2world.sh
-tests/

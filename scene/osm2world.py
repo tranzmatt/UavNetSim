@@ -8,9 +8,11 @@ radio meshes.
 
 from __future__ import annotations
 
+import json
 import math
 import os
 import shutil
+import struct
 import subprocess
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -237,6 +239,7 @@ def _configured_command(jar=None):
         if jar_path.is_file():
             return [
                 _java_command(),
+                "-Dfile.encoding=UTF-8",
                 "--add-exports", "java.base/java.lang=ALL-UNNAMED",
                 "--add-exports", "java.desktop/sun.awt=ALL-UNNAMED",
                 "--add-exports", "java.desktop/sun.java2d=ALL-UNNAMED",
@@ -251,6 +254,43 @@ def _configured_command(jar=None):
     for candidate in ("osm2world", "osm2world.bat", "osm2world.exe"):
         if shutil.which(candidate):
             return [candidate]
+    return None
+
+
+def _validate_rendered_model(path: Path, extension: str) -> str | None:
+    """Return an error when a JSON-based OSM2World model is not valid UTF-8."""
+    if extension not in {"glb", "gltf"}:
+        return None
+    try:
+        if extension == "gltf":
+            payload = path.read_bytes().decode("utf-8")
+        else:
+            with path.open("rb") as stream:
+                header = stream.read(12)
+                if len(header) != 12:
+                    return "GLB header is truncated"
+                magic, version, declared_length = struct.unpack("<4sII", header)
+                if magic != b"glTF" or version != 2:
+                    return "output is not a glTF 2.0 binary"
+                if declared_length != path.stat().st_size:
+                    return "GLB declared length does not match the file size"
+                chunk_header = stream.read(8)
+                if len(chunk_header) != 8:
+                    return "GLB JSON chunk header is truncated"
+                chunk_length, chunk_type = struct.unpack("<I4s", chunk_header)
+                if chunk_type != b"JSON":
+                    return "GLB first chunk is not JSON"
+                chunk = stream.read(chunk_length)
+                if len(chunk) != chunk_length:
+                    return "GLB JSON chunk is truncated"
+                payload = chunk.decode("utf-8").rstrip(" \t\r\n\x00")
+        document = json.loads(payload)
+    except UnicodeDecodeError as error:
+        return f"model JSON is not valid UTF-8: {error}"
+    except (OSError, json.JSONDecodeError) as error:
+        return f"model JSON is invalid: {error}"
+    if not isinstance(document, dict) or not isinstance(document.get("asset"), dict):
+        return "model JSON does not contain a glTF asset object"
     return None
 
 
@@ -297,6 +337,12 @@ def render_osm2world(scene: SceneModel, output_directory, progress=None, jar=Non
             command_cwd = Path(command[jar_index]).resolve().parent
     progress(0.94, "Rendering detailed buildings with OSM2World")
     errors = []
+    process_environment = os.environ.copy()
+    java_options = process_environment.get("JAVA_TOOL_OPTIONS", "")
+    if "-Dfile.encoding=" not in java_options:
+        process_environment["JAVA_TOOL_OPTIONS"] = (
+            f"{java_options} -Dfile.encoding=UTF-8".strip()
+        )
     for extension in ("glb", "gltf", "obj"):
         output_path = render_directory / f"scene.{extension}"
         output_path.unlink(missing_ok=True)
@@ -313,6 +359,9 @@ def render_osm2world(scene: SceneModel, output_directory, progress=None, jar=Non
                     cwd=command_cwd,
                     capture_output=True,
                     text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    env=process_environment,
                     timeout=timeout,
                     check=False,
                 )
@@ -320,6 +369,11 @@ def render_osm2world(scene: SceneModel, output_directory, progress=None, jar=Non
                 errors.append(str(error))
                 continue
             if result.returncode == 0 and output_path.is_file() and output_path.stat().st_size > 0:
+                validation_error = _validate_rendered_model(output_path, extension)
+                if validation_error:
+                    errors.append(f"{extension}: {validation_error}")
+                    output_path.unlink(missing_ok=True)
+                    break
                 relative_model = output_path.relative_to(output_directory).as_posix()
                 return SceneRendering(
                     renderer="osm2world",
