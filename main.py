@@ -36,15 +36,28 @@ def run_simulation(arguments):
 
 def compile_scene_file(arguments):
     scene = SceneModel.model_validate_json(Path(arguments.input).read_text(encoding="utf-8"))
-    print(compile_scene(scene, arguments.output))
+    print(compile_scene(
+        scene,
+        arguments.output,
+        osm2world_jar=arguments.osm2world_jar,
+        enable_osm2world=not arguments.no_osm2world,
+    ))
 
 
 def import_osm(arguments):
     bounds = GeoBounds(south=arguments.south, west=arguments.west,
                        north=arguments.north, east=arguments.east)
     scene = fetch_osm_scene(bounds, arguments.name)
-    compile_scene(scene, arguments.output)
-    print(json.dumps(scene.model_dump(), indent=2))
+    compile_scene(
+        scene,
+        arguments.output,
+        osm2world_jar=arguments.osm2world_jar,
+        enable_osm2world=not arguments.no_osm2world,
+    )
+    compiled_scene = SceneModel.model_validate_json(
+        (Path(arguments.output) / "scene.json").read_text(encoding="utf-8")
+    )
+    print(json.dumps(compiled_scene.model_dump(), indent=2))
 
 
 def parser():
@@ -70,6 +83,8 @@ def parser():
     compile_command = commands.add_parser("compile-scene")
     compile_command.add_argument("input")
     compile_command.add_argument("--output", default="artifacts/scene")
+    compile_command.add_argument("--osm2world-jar", default=None)
+    compile_command.add_argument("--no-osm2world", action="store_true")
     compile_command.set_defaults(handler=compile_scene_file)
 
     osm = commands.add_parser("import-osm")
@@ -79,6 +94,8 @@ def parser():
     osm.add_argument("--east", type=float, required=True)
     osm.add_argument("--name", default="OSM Scene")
     osm.add_argument("--output", default="artifacts/scene")
+    osm.add_argument("--osm2world-jar", default=None)
+    osm.add_argument("--no-osm2world", action="store_true")
     osm.set_defaults(handler=import_osm)
     return root
 

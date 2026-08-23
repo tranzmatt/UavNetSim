@@ -57,6 +57,72 @@ cd ..
 .\.venv\Scripts\python.exe main.py serve --host 127.0.0.1 --port 8000
 ```
 
+## OSM2World detailed rendering (optional)
+
+OSM2World is an optional visual sidecar. It adds detailed building, roof, road
+and surface appearance to the web console, while the original Sionna scene
+remains the source of truth for radio propagation, collision geometry and
+simulation logic. If OSM2World or Java is unavailable, the scene still
+compiles and the console falls back to the built-in geometry renderer.
+
+### Download the optional dependencies
+
+1. Download the **latest build** from the official OSM2World page:
+   [OSM2World latest build](https://osm2world.org/download/files/latest/OSM2World-latest-bin.zip).
+   Choose **latest build** on the download page. Do not choose **old releases
+   and resources** for a normal installation. The numbered [0.4.0 release](https://osm2world.org/download/files/0.4.0/OSM2World-0.4.0-bin.zip)
+   is an older fallback, not the recommended download.
+2. Windows x64 users need only this one Java package:
+   [Eclipse Temurin 17 JRE ZIP](https://adoptium.net/temurin/releases/?version=17&os=windows&arch=x64&package=jre).
+   Eclipse Temurin is the Java distribution; JRE is the runtime package. Do
+   not download both JRE and JDK. Choose the [Temurin 17 JDK ZIP](https://adoptium.net/temurin/releases/?version=17&os=windows&arch=x64&package=jdk)
+   only if Java development tools are needed or a JRE ZIP is unavailable.
+3. Extract both ZIP files into this project-local layout:
+
+```text
+UavNetSim-master/
+└── tools/
+    ├── java/
+    │   └── jdk-17.../ or jre-17.../
+    │       └── bin/java.exe
+    └── osm2world/
+        ├── OSM2World-latest.jar
+        ├── lib/
+        ├── models/
+        ├── resources/
+        └── textures/
+```
+
+The extracted directory and JAR names may vary. The application searches
+`tools/java` and recursively searches `tools/osm2world` for an OSM2World JAR.
+These external runtime files are ignored by Git and must be installed locally
+after cloning; do not commit them.
+
+Verify the installation from the project root:
+
+```powershell
+tools/osm2world/run-osm2world.cmd --help
+```
+
+You can also set `OSM2WORLD_JAR` or pass `--osm2world-jar`. To keep the
+enriched OSM file but disable the optional renderer, use `--no-osm2world`:
+
+```powershell
+.venv/Scripts/python.exe main.py compile-scene scenarios/default_scene.json --output artifacts/scene
+.venv/Scripts/python.exe main.py compile-scene scenarios/default_scene.json --output artifacts/scene --no-osm2world
+```
+
+The normal first-start sequence is:
+
+```powershell
+cd frontend
+npm ci
+npm run build
+cd ..
+.venv/Scripts/python.exe main.py compile-scene scenarios/default_scene.json --output artifacts/scene
+.venv/Scripts/python.exe main.py serve --host 127.0.0.1 --port 8000
+```
+
 ## Features
 Before you start your simulation journey, we recommend that you read this section first, in which some features of this platform are mentioned so that you can decide if this platform meets your development or research needs.
 - Python-based (this simulation platform is developed based on SimPy library in Python);

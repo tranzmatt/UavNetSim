@@ -41,6 +41,86 @@
 - scikit_opt==0.6.6
 - simpy==4.1.1
 
+## 安装及使用
+
+### 基本环境
+
+项目运行需要 Python 3.11 或更高版本，以及 Node.js 18 或更高版本和 npm。
+在项目根目录执行：
+
+```powershell
+py -3.12 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install --upgrade pip
+.\.venv\Scripts\python.exe -m pip install -e .
+
+cd frontend
+npm ci
+npm run build
+cd ..
+```
+
+### OSM2World 详细外观渲染（可选）
+
+OSM2World 只是可选的可视化组件，用于为网页控制台增加更详细的建筑、屋顶、道路和地面外观。
+它不会替换 Sionna 的无线传播场景、碰撞几何或仿真逻辑。没有安装 OSM2World 或 Java 时，项目仍然可以编译场景，并自动回退到内置的建筑和地面渲染。
+
+#### 下载哪个 OSM2World 版本
+
+请打开 [OSM2World 官方下载页](https://osm2world.org/download/)，在 **Releases** 中选择 **latest build**，或直接下载 [OSM2World latest build](https://osm2world.org/download/files/latest/OSM2World-latest-bin.zip)。
+
+不要为正常安装选择 **old releases and resources**。页面中的 [0.4.0](https://osm2world.org/download/files/0.4.0/OSM2World-0.4.0-bin.zip) 是旧的编号版本，仅作为兼容性备用版本，不是本项目推荐的下载项。
+
+#### Java 下载哪个文件
+
+Windows x64 用户只需要下载下面这一个文件：[Eclipse Temurin 17 JRE ZIP](https://adoptium.net/temurin/releases/?version=17&os=windows&arch=x64&package=jre)。
+
+这里的关系是：**Eclipse Temurin** 是 Java 的发行版，**JRE** 是用于运行 Java 程序的运行环境，**JDK** 是包含开发工具的完整开发包。运行 OSM2World 只需要 JRE，不需要同时下载 JRE 和 JDK。只有在需要 Java 开发工具，或下载页面没有 JRE ZIP 时，才选择 [Temurin 17 JDK ZIP](https://adoptium.net/temurin/releases/?version=17&os=windows&arch=x64&package=jdk)。
+
+在下载页面选择 **Windows、x64、JRE、ZIP**。推荐 ZIP 是因为可以直接放入项目目录，不需要修改系统环境变量。若电脑已经安装 Java 17 或更高版本，则不需要重复下载 Java。
+
+#### 解压到什么位置
+
+将两个 ZIP 解压到项目内的以下目录。文件夹和 JAR 文件的具体版本名称可以不同，不要强制改名：
+
+```text
+UavNetSim-master/
+└── tools/
+    ├── java/
+    │   └── jdk-17.../ 或 jre-17.../
+    │       └── bin/java.exe
+    └── osm2world/
+        ├── OSM2World-latest.jar
+        ├── lib/
+        ├── models/
+        ├── resources/
+        └── textures/
+```
+
+程序会自动搜索 `tools/java`，并在 `tools/osm2world` 中递归查找 OSM2World JAR。Java、OSM2World JAR、纹理和模型资源属于外部依赖，已通过 `.gitignore` 排除，不要将它们提交到 GitHub。
+
+安装后可在项目根目录验证：
+
+```powershell
+tools/osm2world/run-osm2world.cmd --help
+```
+
+如果未安装 OSM2World 或 Java，该命令会提示缺少的文件；项目本身仍然可以正常编译并使用内置渲染。也可以通过环境变量 `OSM2WORLD_JAR` 或命令行参数 `--osm2world-jar` 指定 JAR 路径。
+
+#### 启动项目
+
+首次安装完成后，先编译默认场景，再启动后端：
+
+```powershell
+.venv/Scripts/python.exe main.py compile-scene scenarios/default_scene.json --output artifacts/scene
+.venv/Scripts/python.exe main.py serve --host 127.0.0.1 --port 8000
+```
+
+浏览器打开 `http://127.0.0.1:8000`。以后如果前端代码没有变化，只需执行启动命令即可。若只想使用原有的内置场景渲染，同时仍生成 OSM 文件，可执行：
+
+```powershell
+.venv/Scripts/python.exe main.py compile-scene scenarios/default_scene.json --output artifacts/scene --no-osm2world
+```
+
 ## 特色
 在开始您的仿真之旅前，我们建议您先阅读本小节，本节中介绍了该平台的一些特点，您可以据此来判断该平台是否满足您的开发或研究需求。
 - 该平台完全基于Python开发（主要是基于Python中的SimPy库）；

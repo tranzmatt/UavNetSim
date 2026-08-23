@@ -8,3 +8,17 @@ frontend/dist/
 artifacts/
 running_log.log
 server.*.log
+tools/osm2world/*.zip
+# Java and OSM2World are external runtime dependencies and may be large.
+tools/java/
+tools/osm2world/OSM2World.jar
+tools/osm2world/lib/
+tools/osm2world/locales/
+tools/osm2world/models/
+tools/osm2world/resources/
+tools/osm2world/textures/
+tools/osm2world/LICENSE.txt
+tools/osm2world/standard.properties
+tools/osm2world/osm2world-windows.bat
+tools/osm2world/osm2world.sh
+tests/
