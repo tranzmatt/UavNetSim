@@ -5,6 +5,7 @@ import * as THREE from 'three'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import { MTLLoader } from 'three/examples/jsm/loaders/MTLLoader.js'
 import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader.js'
+import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js'
 
 const MATERIAL_COLORS = {
   itu_concrete: '#5f6669',
@@ -14,6 +15,48 @@ const MATERIAL_COLORS = {
   itu_wood: '#74644f',
   itu_medium_dry_ground: '#52604d',
   itu_wet_ground: '#315a68',
+}
+
+function SceneEnvironment() {
+  const { gl, scene } = useThree()
+  useEffect(() => {
+    const room = new RoomEnvironment()
+    const pmrem = new THREE.PMREMGenerator(gl)
+    const environment = pmrem.fromScene(room, 0.04).texture
+    const previousEnvironment = scene.environment
+    const previousEnvironmentIntensity = scene.environmentIntensity
+    const previousToneMapping = gl.toneMapping
+    const previousExposure = gl.toneMappingExposure
+
+    scene.environment = environment
+    scene.environmentIntensity = 0.9
+    gl.toneMapping = THREE.ACESFilmicToneMapping
+    gl.toneMappingExposure = 1.08
+
+    room.dispose()
+    pmrem.dispose()
+    return () => {
+      scene.environment = previousEnvironment
+      scene.environmentIntensity = previousEnvironmentIntensity
+      gl.toneMapping = previousToneMapping
+      gl.toneMappingExposure = previousExposure
+      environment.dispose()
+    }
+  }, [gl, scene])
+  return null
+}
+
+function configureOsm2WorldMaterial(material) {
+  if (!material?.name?.toUpperCase().includes('GLASS') || !material.isMeshStandardMaterial) return
+
+  // OSM2World's combined PBR map makes facade glass highly metallic and nearly
+  // mirror-smooth. In the simulator's dark scene that reflects as solid black.
+  material.metalnessMap = null
+  material.roughnessMap = null
+  material.metalness = 0.12
+  material.roughness = 0.28
+  material.envMapIntensity = 0.9
+  material.needsUpdate = true
 }
 
 function terrainHeightAt(terrain, sizeX, sizeY, x, y) {
@@ -259,6 +302,8 @@ function Osm2WorldModel({ scene, onError, onReady }) {
         if (child.isMesh) {
           child.castShadow = true
           child.receiveShadow = true
+          const materials = Array.isArray(child.material) ? child.material : [child.material]
+          materials.forEach(configureOsm2WorldMaterial)
         }
       })
       alignOsm2WorldModel(next, scene)
@@ -436,6 +481,7 @@ export default function SceneViewport({ scene, nodes, arcs, selectedNode, onSele
   return (
     <Canvas shadows dpr={[1, 1.7]} camera={{ fov: 46, near: 0.5, far: 5000 }}>
       <color attach="background" args={['#171a1c']} /><fog attach="fog" args={['#171a1c', 650, 1600]} />
+      <SceneEnvironment />
       <ambientLight intensity={0.58} /><directionalLight position={[250, 500, 180]} intensity={1.9} castShadow shadow-mapSize={[2048, 2048]} />
       {scene.terrain ? <Terrain terrain={scene.terrain} /> : <mesh position={[scene.size_x / 2, -0.2, -scene.size_y / 2]} rotation={[-Math.PI / 2, 0, 0]} receiveShadow><planeGeometry args={[scene.size_x + 100, scene.size_y + 100]} /><meshStandardMaterial color="#24282a" roughness={0.92} /></mesh>}
       {!scene.terrain && <Grid position={[scene.size_x / 2, 0, -scene.size_y / 2]} args={[scene.size_x, scene.size_y]} cellSize={20} cellThickness={0.45} cellColor="#42494b" sectionSize={100} sectionThickness={0.8} sectionColor="#5d6668" fadeDistance={900} />}
