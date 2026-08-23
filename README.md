@@ -16,9 +16,7 @@
 
 Read this in other language: [中文](README_CHINESE.md)
 
-<div align="center">
-<img src="https://github.com/Zihao-Felix-Zhou/UavNetSim-v1/blob/master/img/screenshot_new.png" width="1000px">
-</div>
+
 <div align="center">
 <img src="https://github.com/Zihao-Felix-Zhou/UavNetSim-v1/blob/master/img/scenario_selection.png" width="1000px">
 </div>
