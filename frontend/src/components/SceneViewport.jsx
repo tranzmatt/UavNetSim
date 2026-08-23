@@ -4,6 +4,7 @@ import { Grid, Line, OrbitControls } from '@react-three/drei'
 import * as THREE from 'three'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import { MTLLoader } from 'three/examples/jsm/loaders/MTLLoader.js'
+import { TessellateModifier } from 'three/examples/jsm/modifiers/TessellateModifier.js'
 import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader.js'
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js'
 
@@ -72,9 +73,44 @@ function terrainHeightAt(terrain, sizeX, sizeY, x, y) {
   const southeast = terrain.vertices[base + 1].z
   const northwest = terrain.vertices[base + terrain.columns].z
   const northeast = terrain.vertices[base + terrain.columns + 1].z
-  const south = THREE.MathUtils.lerp(southwest, southeast, fractionX)
-  const north = THREE.MathUtils.lerp(northwest, northeast, fractionX)
-  return THREE.MathUtils.lerp(south, north, fractionY)
+  // Terrain uses the southwest-to-northeast diagonal for every grid cell.
+  // Interpolating on those same triangles prevents projected surfaces from
+  // crossing the visible terrain mesh.
+  if (fractionY <= fractionX) {
+    return southwest
+      + fractionX * (southeast - southwest)
+      + fractionY * (northeast - southeast)
+  }
+  return southwest
+    + fractionX * (northeast - northwest)
+    + fractionY * (northwest - southwest)
+}
+
+function featureElevationAt(feature, x, y) {
+  const points = feature?.footprint || []
+  if (points.length === 0) return null
+  if (points.length === 1) return Number(points[0].z) || 0
+
+  let closestDistanceSquared = Infinity
+  let closestElevation = null
+  for (let index = 0; index < points.length - 1; index += 1) {
+    const start = points[index]
+    const end = points[index + 1]
+    const deltaX = end.x - start.x
+    const deltaY = end.y - start.y
+    const lengthSquared = deltaX * deltaX + deltaY * deltaY
+    const amount = lengthSquared > 0
+      ? THREE.MathUtils.clamp(((x - start.x) * deltaX + (y - start.y) * deltaY) / lengthSquared, 0, 1)
+      : 0
+    const projectedX = THREE.MathUtils.lerp(start.x, end.x, amount)
+    const projectedY = THREE.MathUtils.lerp(start.y, end.y, amount)
+    const distanceSquared = (x - projectedX) ** 2 + (y - projectedY) ** 2
+    if (distanceSquared < closestDistanceSquared) {
+      closestDistanceSquared = distanceSquared
+      closestElevation = THREE.MathUtils.lerp(Number(start.z) || 0, Number(end.z) || 0, amount)
+    }
+  }
+  return closestElevation
 }
 
 function CameraTarget({ scene }) {
@@ -103,7 +139,8 @@ function CameraTarget({ scene }) {
 
 function Roof({ feature, baseHeight }) {
   const roofShape = feature.osm_tags?.['roof:shape'] || 'flat'
-  const roofHeight = Number(feature.osm_tags?.['roof:height'] || 0)
+  const parsedRoofHeight = Number(feature.osm_tags?.['roof:height'] || 0)
+  const roofHeight = Number.isFinite(parsedRoofHeight) ? parsedRoofHeight : 0
   const geometry = useMemo(() => {
     if (roofShape === 'flat' || roofHeight <= 0.01) return null
     const shape = new THREE.Shape()
@@ -226,22 +263,71 @@ function hasOsm2WorldSurfaceAncestor(object, kind) {
   return false
 }
 
+function tessellateOsm2WorldSurface(root, terrain) {
+  const first = terrain.vertices[0]
+  const east = terrain.vertices[1]
+  const north = terrain.vertices[terrain.columns]
+  const resolutionX = Math.hypot(east.x - first.x, east.y - first.y)
+  const resolutionY = Math.hypot(north.x - first.x, north.y - first.y)
+  const maximumEdgeLength = Math.max(2, Math.min(resolutionX, resolutionY) * 0.25)
+  const modifier = new TessellateModifier(maximumEdgeLength, 8)
+
+  root.traverse((child) => {
+    if (!child.isMesh || !child.geometry?.attributes?.position) return
+    const original = child.geometry
+    const tessellated = modifier.modify(original)
+    const values = tessellated.attributes.position.array
+    if (!values.every(Number.isFinite)) {
+      tessellated.dispose()
+      return
+    }
+    child.geometry = tessellated
+    original.dispose()
+  })
+}
+
 function drapeOsm2WorldSurface(root, scene, feature, kind) {
   if (!scene.terrain) return
+  const tags = feature?.osm_tags || {}
+  const isTunnel = kind === 'road' && tags.tunnel && tags.tunnel !== 'no'
+  if (isTunnel) {
+    root.visible = false
+    return
+  }
+
   const bounds = new THREE.Box3().setFromObject(root)
   const baseHeight = bounds.min.y
-  const lift = kind === 'water' ? 0.18 : feature?.osm_tags?.bridge === 'yes' ? 1.5 : 0.28
+  const isBridge = kind === 'road' && tags.bridge && tags.bridge !== 'no'
+  const lift = kind === 'water' ? 0.18 : isBridge ? 0.55 : 0.3
+  if (kind === 'road') tessellateOsm2WorldSurface(root, scene.terrain)
+  root.updateMatrixWorld(true)
   const position = new THREE.Vector3()
   root.traverse((child) => {
     if (!child.isMesh || !child.geometry?.attributes?.position) return
     const positions = child.geometry.attributes.position
     for (let index = 0; index < positions.count; index += 1) {
       position.fromBufferAttribute(positions, index)
+      const localX = position.x
+      const localY = position.y
+      const localZ = position.z
       child.localToWorld(position)
       const relativeHeight = position.y - baseHeight
-      position.y = terrainHeightAt(scene.terrain, scene.size_x, scene.size_y, position.x, -position.z) + lift + relativeHeight
+      const bridgeHeight = isBridge ? featureElevationAt(feature, position.x, -position.z) : null
+      const surfaceHeight = bridgeHeight ?? terrainHeightAt(
+        scene.terrain,
+        scene.size_x,
+        scene.size_y,
+        position.x,
+        -position.z,
+      )
+      if (!Number.isFinite(surfaceHeight) || !Number.isFinite(relativeHeight)) continue
+      position.y = surfaceHeight + lift + relativeHeight
       child.worldToLocal(position)
-      positions.setXYZ(index, position.x, position.y, position.z)
+      if ([position.x, position.y, position.z].every(Number.isFinite)) {
+        positions.setXYZ(index, position.x, position.y, position.z)
+      } else {
+        positions.setXYZ(index, localX, localY, localZ)
+      }
     }
     positions.needsUpdate = true
     child.geometry.computeVertexNormals()
