@@ -8,6 +8,7 @@ from shapely.geometry import Polygon
 from shapely.validation import make_valid
 
 from scene.models import SceneModel
+from scene.osm2world import enrich_scene, render_osm2world
 
 
 ITU_TYPES = {
@@ -78,8 +79,10 @@ def _write_xml(meshes, materials, output_directory):
     return xml_path
 
 
-def compile_scene(scene: SceneModel, output_directory, progress=None):
+def compile_scene(scene: SceneModel, output_directory, progress=None, osm2world_jar=None,
+                  enable_osm2world=True, asset_version=None):
     progress = progress or (lambda _value, _stage: None)
+    scene = enrich_scene(scene)
     output_directory = Path(output_directory)
     mesh_directory = output_directory / "meshes"
     mesh_directory.mkdir(parents=True, exist_ok=True)
@@ -106,7 +109,17 @@ def compile_scene(scene: SceneModel, output_directory, progress=None):
             0.05 + 0.85 * (index + 1) / max(1, len(compiled_features)),
             f"Meshing {feature.category} features",
         )
-    progress(0.93, "Writing Sionna scene")
+    progress(0.91, "Preparing OSM2World building metadata")
+    rendering = render_osm2world(
+        scene,
+        output_directory,
+        progress=progress,
+        jar=osm2world_jar,
+        enabled=enable_osm2world,
+        asset_version=asset_version,
+    )
+    scene = scene.model_copy(update={"rendering": rendering})
+    progress(0.97, "Writing Sionna scene")
     scene_path = output_directory / "scene.json"
     scene_path.write_text(scene.model_dump_json(indent=2), encoding="utf-8")
     xml_path = _write_xml(meshes, materials, output_directory)
@@ -123,6 +136,7 @@ def compile_scene(scene: SceneModel, output_directory, progress=None):
             "resolution_m": scene.terrain.resolution_m,
             "source": scene.terrain.source,
         } if scene.terrain else None,
+        "rendering": rendering.model_dump(),
     }
     (output_directory / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     progress(1.0, "Sionna scene ready")

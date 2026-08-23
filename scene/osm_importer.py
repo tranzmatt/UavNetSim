@@ -50,7 +50,7 @@ def _height(tags):
             return max(1.0, float(levels) * 3.2)
         except ValueError:
             pass
-    building_type = tags.get("building", "")
+    building_type = tags.get("building", tags.get("building:part", ""))
     if building_type in {"office", "commercial", "apartments"}:
         return 18.0
     if building_type in {"industrial", "warehouse"}:
@@ -59,7 +59,16 @@ def _height(tags):
 
 
 def _material(tags):
-    raw = tags.get("building:material", tags.get("material", "")).lower()
+    raw = tags.get(
+        "facade:material",
+        tags.get(
+            "building:facade:material",
+            tags.get(
+                "building:wall:material",
+                tags.get("building:material", tags.get("material", "")),
+            ),
+        ),
+    ).lower()
     return MATERIALS.get(raw, "itu_concrete")
 
 
@@ -67,8 +76,12 @@ def _tagged(tags, choices):
     return any(tags.get(key) == value for key, value in choices)
 
 
+def _osm_tags(tags):
+    return {str(key): str(value) for key, value in tags.items()}
+
+
 def _feature_kind(tags):
-    if tags.get("building"):
+    if tags.get("building") or tags.get("building:part"):
         return "building", _material(tags), _height(tags)
     if tags.get("highway"):
         return "road", "itu_concrete", 0.0
@@ -84,7 +97,9 @@ def _query(bounds: GeoBounds):
     return f"""[out:json][timeout:30];
 (
   way[\"building\"]({box});
+  way[\"building:part\"]({box});
   relation[\"building\"]({box});
+  relation[\"building:part\"]({box});
   way[\"highway\"]({box});
   way[\"natural\"~\"^(grassland|heath|water)$\"]({box});
   relation[\"natural\"~\"^(grassland|heath|water)$\"]({box});
@@ -205,6 +220,8 @@ def parse_osm_scene(payload, bounds: GeoBounds, name="OSM Scene", progress=None)
                 height=height,
                 material=material,
                 source="openstreetmap",
+                osm_id=f"way/{element['id']}",
+                osm_tags=_osm_tags(tags),
             ))
     for relation in elements:
         if relation.get("type") != "relation":
@@ -229,6 +246,8 @@ def parse_osm_scene(payload, bounds: GeoBounds, name="OSM Scene", progress=None)
                     height=height,
                     material=material,
                     source="openstreetmap",
+                    osm_id=f"relation/{relation['id']}",
+                    osm_tags=_osm_tags(tags),
                 ))
     progress(0.95, "Finalizing geospatial model")
     northeast = lat_lon_to_enu(bounds.north, bounds.east, anchor)

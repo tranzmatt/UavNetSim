@@ -34,6 +34,8 @@ class SceneFeature(BaseModel):
     height: float = Field(default=0.0, ge=0.0)
     material: str = "itu_concrete"
     source: str = "user"
+    osm_id: str | None = None
+    osm_tags: dict[str, str] = Field(default_factory=dict)
 
 
 class TerrainMesh(BaseModel):
@@ -46,6 +48,16 @@ class TerrainMesh(BaseModel):
     source: str
 
 
+class SceneRendering(BaseModel):
+    renderer: str = "none"
+    status: Literal["not_requested", "not_available", "rendered", "failed"] = "not_requested"
+    osm_file: str | None = None
+    model_file: str | None = None
+    model_format: Literal["glb", "gltf", "obj"] | None = None
+    asset_version: str | None = None
+    message: str | None = None
+
+
 class SceneModel(BaseModel):
     schema_version: int = 1
     name: str
@@ -55,3 +67,4 @@ class SceneModel(BaseModel):
     size_y: float = Field(gt=0)
     features: list[SceneFeature] = Field(default_factory=list)
     terrain: TerrainMesh | None = None
+    rendering: SceneRendering | None = None

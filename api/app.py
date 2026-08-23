@@ -83,15 +83,15 @@ scene_builds: dict[str, SceneBuildState] = {}
 scene_build_lock = Lock()
 
 
-def _activate_scene(scene, progress=None):
+def _activate_scene(scene, progress=None, asset_version=None):
     output = config.PROJECT_ROOT / "artifacts" / "scene"
-    compile_scene(scene, output, progress)
+    compile_scene(scene, output, progress, asset_version=asset_version)
     config.SIONNA_SCENE_PATH = str(output / "scene.xml")
     config.MAP_LENGTH = scene.size_x
     config.MAP_WIDTH = scene.size_y
     terrain_height = max((point.z for point in scene.terrain.vertices), default=0.0) if scene.terrain else 0.0
     config.MAP_HEIGHT = terrain_height + config.AIRSPACE_HEIGHT_ABOVE_TERRAIN
-    return scene
+    return SceneModel.model_validate_json((output / "scene.json").read_text(encoding="utf-8"))
 
 
 def _update_scene_build(build_id, **changes):
@@ -121,7 +121,7 @@ def _run_scene_build(build_id, request):
         def compile_progress(value, stage):
             _update_scene_build(build_id, progress=55 + round(value * 43), stage=stage)
 
-        _activate_scene(scene, compile_progress)
+        scene = _activate_scene(scene, compile_progress, asset_version=f"build-{build_id}")
         _update_scene_build(
             build_id,
             status="completed",
@@ -265,6 +265,18 @@ async def event_stream(websocket: WebSocket):
 
 
 frontend = config.PROJECT_ROOT / "frontend" / "dist"
+artifacts = config.PROJECT_ROOT / "artifacts"
+artifacts.mkdir(parents=True, exist_ok=True)
+
+
+@app.get("/artifacts/{asset_path:path}")
+def artifact_file(asset_path: str):
+    candidate = (artifacts / asset_path).resolve()
+    if artifacts not in candidate.parents or not candidate.is_file():
+        raise HTTPException(404, "Artifact not found")
+    return FileResponse(candidate, headers={"Cache-Control": "no-store"})
+
+
 if frontend.is_dir():
     app.mount("/assets", StaticFiles(directory=frontend / "assets"), name="assets")
 
