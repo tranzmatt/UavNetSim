@@ -30,7 +30,7 @@ function SceneEnvironment() {
     const previousExposure = gl.toneMappingExposure
 
     scene.environment = environment
-    scene.environmentIntensity = 0.9
+    scene.environmentIntensity = 0.95
     gl.toneMapping = THREE.ACESFilmicToneMapping
     gl.toneMappingExposure = 1.08
 
@@ -45,6 +45,30 @@ function SceneEnvironment() {
     }
   }, [gl, scene])
   return null
+}
+
+function SceneLighting({ scene }) {
+  const light = useRef()
+  const target = useRef()
+  const scale = Math.max(scene.size_x, scene.size_y)
+  useEffect(() => {
+    if (!light.current || !target.current) return
+    light.current.target = target.current
+    light.current.target.updateMatrixWorld()
+  }, [scene])
+  return (
+    <>
+      <hemisphereLight args={['#d9e6e8', '#3b4038', 0.55]} />
+      <directionalLight
+        ref={light}
+        position={[scene.size_x * 0.15, scale * 1.5, scene.size_y * 0.35]}
+        intensity={1.85}
+        castShadow
+        shadow-mapSize={[2048, 2048]}
+      />
+      <object3D ref={target} position={[scene.size_x / 2, 0, -scene.size_y / 2]} />
+    </>
+  )
 }
 
 function configureOsm2WorldMaterial(material) {
@@ -564,11 +588,15 @@ export default function SceneViewport({ scene, nodes, arcs, selectedNode, onSele
     setModelLoaded(true)
   }, [])
   const detailedModelActive = hasOsm2WorldModel && !modelFailed && modelLoaded
+  const sceneScale = Math.max(scene.size_x, scene.size_y)
+  const fogNear = Math.max(1000, sceneScale * 1.6)
+  const fogFar = Math.max(2600, sceneScale * 4)
   return (
     <Canvas shadows dpr={[1, 1.7]} camera={{ fov: 46, near: 0.5, far: 5000 }}>
-      <color attach="background" args={['#171a1c']} /><fog attach="fog" args={['#171a1c', 650, 1600]} />
+      <color attach="background" args={['#1b2022']} /><fog attach="fog" args={['#1b2022', fogNear, fogFar]} />
       <SceneEnvironment />
-      <ambientLight intensity={0.58} /><directionalLight position={[250, 500, 180]} intensity={1.9} castShadow shadow-mapSize={[2048, 2048]} />
+      <ambientLight intensity={0.25} />
+      <SceneLighting scene={scene} />
       {scene.terrain ? <Terrain terrain={scene.terrain} /> : <mesh position={[scene.size_x / 2, -0.2, -scene.size_y / 2]} rotation={[-Math.PI / 2, 0, 0]} receiveShadow><planeGeometry args={[scene.size_x + 100, scene.size_y + 100]} /><meshStandardMaterial color="#24282a" roughness={0.92} /></mesh>}
       {!scene.terrain && <Grid position={[scene.size_x / 2, 0, -scene.size_y / 2]} args={[scene.size_x, scene.size_y]} cellSize={20} cellThickness={0.45} cellColor="#42494b" sectionSize={100} sectionThickness={0.8} sectionColor="#5d6668" fadeDistance={900} />}
       <SceneBoundary scene={scene} />
