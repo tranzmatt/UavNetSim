@@ -19,6 +19,46 @@ TERRAIN_TILE_URLS = (
 )
 
 
+def _repair_elevation_outliers(elevations):
+    """Replace isolated/corrupt DEM values using surrounding valid samples."""
+    repaired = np.asarray(elevations, dtype=np.float64).copy()
+    finite = repaired[np.isfinite(repaired)]
+    if finite.size == 0:
+        raise RuntimeError("Terrain elevation tiles contain no valid data")
+
+    lower_quartile, upper_quartile = np.percentile(finite, (25, 75))
+    interquartile_range = upper_quartile - lower_quartile
+    margin = max(100.0, 3.0 * interquartile_range)
+    invalid = (
+        ~np.isfinite(repaired)
+        | (repaired < lower_quartile - margin)
+        | (repaired > upper_quartile + margin)
+    )
+    if not np.any(invalid):
+        return repaired
+
+    repaired[invalid] = np.nan
+    remaining = int(np.count_nonzero(invalid))
+    rows, columns = repaired.shape
+    while remaining:
+        updates = []
+        for row, column in np.argwhere(np.isnan(repaired)):
+            neighbors = repaired[
+                max(0, row - 1):min(rows, row + 2),
+                max(0, column - 1):min(columns, column + 2),
+            ]
+            valid_neighbors = neighbors[np.isfinite(neighbors)]
+            if valid_neighbors.size:
+                updates.append((row, column, float(np.median(valid_neighbors))))
+        if not updates:
+            repaired[np.isnan(repaired)] = float(np.median(finite))
+            break
+        for row, column, value in updates:
+            repaired[row, column] = value
+        remaining -= len(updates)
+    return repaired
+
+
 def _global_pixel(latitude, longitude, zoom=TERRAIN_ZOOM):
     latitude = max(-85.05112878, min(85.05112878, latitude))
     scale = TILE_SIZE * (2 ** zoom)
@@ -117,6 +157,7 @@ def attach_terrain(scene, progress=None):
             elevations[row, column] = _sample_elevation(tiles, latitude, longitude)
         progress(0.45 + 0.3 * (row + 1) / rows, "Sampling terrain elevation")
 
+    elevations = _repair_elevation_outliers(elevations)
     elevation_offset = float(np.min(elevations))
     elevations -= elevation_offset
     vertices = [
