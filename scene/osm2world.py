@@ -8,6 +8,7 @@ radio meshes.
 
 from __future__ import annotations
 
+import copy
 import json
 import math
 import os
@@ -173,8 +174,8 @@ def _way_id(index):
     return str(-2_000_000_000 - index)
 
 
-def write_osm(scene: SceneModel, path) -> Path:
-    """Write a valid OSM 0.6 XML view of the scene."""
+def write_osm(scene: SceneModel, path, included_categories=None, excluded_categories=()) -> Path:
+    """Write a valid OSM 0.6 XML view, optionally omitting visual-only layers."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     root = ET.Element(
@@ -191,6 +192,10 @@ def write_osm(scene: SceneModel, path) -> Path:
 
     node_index = 0
     for feature_index, feature in enumerate(scene.features):
+        if included_categories is not None and feature.category not in included_categories:
+            continue
+        if feature.category in excluded_categories:
+            continue
         if len(feature.footprint) < 2:
             continue
         tags = complete_osm_tags(feature)
@@ -257,6 +262,236 @@ def _configured_command(jar=None):
     return None
 
 
+def _read_glb_document(path: Path):
+    with path.open("rb") as stream:
+        header = stream.read(12)
+        if len(header) != 12:
+            raise ValueError("GLB header is truncated")
+        magic, version, declared_length = struct.unpack("<4sII", header)
+        if magic != b"glTF" or version != 2 or declared_length != path.stat().st_size:
+            raise ValueError("GLB header is invalid")
+        json_header = stream.read(8)
+        if len(json_header) != 8:
+            raise ValueError("GLB JSON chunk header is truncated")
+        json_length, json_type = struct.unpack("<I4s", json_header)
+        if json_type != b"JSON":
+            raise ValueError("GLB first chunk is not JSON")
+        document = json.loads(stream.read(json_length).decode("utf-8").rstrip(" \t\r\n\x00"))
+        binary_header = stream.read(8)
+        if len(binary_header) != 8:
+            raise ValueError("GLB binary chunk header is truncated")
+        binary_length, binary_type = struct.unpack("<I4s", binary_header)
+        if binary_type != b"BIN\x00":
+            raise ValueError("GLB second chunk is not binary")
+        return document, stream.tell(), binary_length
+
+
+def _texture_indices(material):
+    indices = []
+    pbr = material.get("pbrMetallicRoughness", {})
+    for field in ("baseColorTexture", "metallicRoughnessTexture"):
+        if field in pbr:
+            indices.append(pbr[field]["index"])
+    for field in ("normalTexture", "occlusionTexture", "emissiveTexture"):
+        if field in material:
+            indices.append(material[field]["index"])
+    return indices
+
+
+def _remap_material_textures(material, mapping):
+    pbr = material.get("pbrMetallicRoughness", {})
+    for field in ("baseColorTexture", "metallicRoughnessTexture"):
+        if field in pbr:
+            pbr[field]["index"] = mapping[pbr[field]["index"]]
+    for field in ("normalTexture", "occlusionTexture", "emissiveTexture"):
+        if field in material:
+            material[field]["index"] = mapping[material[field]["index"]]
+
+
+def _compact_building_glb(path: Path):
+    """Rewrite an OSM2World GLB with only building scene nodes and dependencies."""
+    document, binary_offset, binary_length = _read_glb_document(path)
+    if document.get("extensionsUsed") or document.get("animations") or document.get("skins"):
+        raise ValueError("Unsupported GLB features in OSM2World visualization")
+    nodes = document.get("nodes", [])
+    scene_roots = {
+        index
+        for scene in document.get("scenes", [])
+        for index in scene.get("nodes", [])
+    }
+    kept_nodes = set(scene_roots)
+
+    def keep_subtree(index):
+        if index in kept_nodes:
+            return
+        kept_nodes.add(index)
+        for child in nodes[index].get("children", []):
+            keep_subtree(child)
+
+    def find_buildings(index):
+        node = nodes[index]
+        if str(node.get("name", "")).upper().startswith("BUILDING"):
+            keep_subtree(index)
+            return
+        for child in node.get("children", []):
+            find_buildings(child)
+
+    for root in scene_roots:
+        find_buildings(root)
+
+    node_indices = sorted(kept_nodes)
+    node_map = {old: new for new, old in enumerate(node_indices)}
+    new_nodes = []
+    for index in node_indices:
+        node = copy.deepcopy(nodes[index])
+        if "children" in node:
+            children = [node_map[child] for child in node["children"] if child in kept_nodes]
+            if children:
+                node["children"] = children
+            else:
+                node.pop("children")
+        new_nodes.append(node)
+
+    mesh_indices = sorted({node["mesh"] for node in new_nodes if "mesh" in node})
+    mesh_map = {old: new for new, old in enumerate(mesh_indices)}
+    for node in new_nodes:
+        if "mesh" in node:
+            node["mesh"] = mesh_map[node["mesh"]]
+    meshes = [copy.deepcopy(document["meshes"][index]) for index in mesh_indices]
+
+    accessor_indices = set()
+    material_indices = set()
+    for mesh in meshes:
+        for primitive in mesh.get("primitives", []):
+            accessor_indices.update(primitive.get("attributes", {}).values())
+            if "indices" in primitive:
+                accessor_indices.add(primitive["indices"])
+            for target in primitive.get("targets", []):
+                accessor_indices.update(target.values())
+            if "material" in primitive:
+                material_indices.add(primitive["material"])
+    accessor_indices = sorted(accessor_indices)
+    accessor_map = {old: new for new, old in enumerate(accessor_indices)}
+    material_indices = sorted(material_indices)
+    material_map = {old: new for new, old in enumerate(material_indices)}
+    for mesh in meshes:
+        for primitive in mesh.get("primitives", []):
+            primitive["attributes"] = {
+                name: accessor_map[index] for name, index in primitive.get("attributes", {}).items()
+            }
+            if "indices" in primitive:
+                primitive["indices"] = accessor_map[primitive["indices"]]
+            for target in primitive.get("targets", []):
+                for name, index in list(target.items()):
+                    target[name] = accessor_map[index]
+            if "material" in primitive:
+                primitive["material"] = material_map[primitive["material"]]
+
+    accessors = [copy.deepcopy(document["accessors"][index]) for index in accessor_indices]
+    materials = [copy.deepcopy(document["materials"][index]) for index in material_indices]
+    texture_indices = sorted({index for material in materials for index in _texture_indices(material)})
+    texture_map = {old: new for new, old in enumerate(texture_indices)}
+    for material in materials:
+        _remap_material_textures(material, texture_map)
+    textures = [copy.deepcopy(document["textures"][index]) for index in texture_indices]
+
+    image_indices = sorted({texture["source"] for texture in textures if "source" in texture})
+    image_map = {old: new for new, old in enumerate(image_indices)}
+    sampler_indices = sorted({texture["sampler"] for texture in textures if "sampler" in texture})
+    sampler_map = {old: new for new, old in enumerate(sampler_indices)}
+    for texture in textures:
+        if "source" in texture:
+            texture["source"] = image_map[texture["source"]]
+        if "sampler" in texture:
+            texture["sampler"] = sampler_map[texture["sampler"]]
+    images = [copy.deepcopy(document["images"][index]) for index in image_indices]
+    samplers = [copy.deepcopy(document["samplers"][index]) for index in sampler_indices]
+
+    buffer_view_indices = set()
+    for accessor in accessors:
+        if "bufferView" in accessor:
+            buffer_view_indices.add(accessor["bufferView"])
+        sparse = accessor.get("sparse", {})
+        for field in ("indices", "values"):
+            if "bufferView" in sparse.get(field, {}):
+                buffer_view_indices.add(sparse[field]["bufferView"])
+    for image in images:
+        if "bufferView" in image:
+            buffer_view_indices.add(image["bufferView"])
+    buffer_view_indices = sorted(buffer_view_indices)
+    buffer_view_map = {old: new for new, old in enumerate(buffer_view_indices)}
+
+    new_buffer_views = []
+    binary_cursor = 0
+    for index in buffer_view_indices:
+        view = copy.deepcopy(document["bufferViews"][index])
+        binary_cursor += -binary_cursor % 4
+        view["buffer"] = 0
+        view["byteOffset"] = binary_cursor
+        binary_cursor += view["byteLength"]
+        new_buffer_views.append(view)
+    binary_size = binary_cursor + (-binary_cursor % 4)
+    for accessor in accessors:
+        if "bufferView" in accessor:
+            accessor["bufferView"] = buffer_view_map[accessor["bufferView"]]
+        sparse = accessor.get("sparse", {})
+        for field in ("indices", "values"):
+            if "bufferView" in sparse.get(field, {}):
+                sparse[field]["bufferView"] = buffer_view_map[sparse[field]["bufferView"]]
+    for image in images:
+        if "bufferView" in image:
+            image["bufferView"] = buffer_view_map[image["bufferView"]]
+
+    result = {
+        "asset": copy.deepcopy(document["asset"]),
+        "scene": document.get("scene", 0),
+        "scenes": copy.deepcopy(document.get("scenes", [])),
+        "nodes": new_nodes,
+        "meshes": meshes,
+        "accessors": accessors,
+        "bufferViews": new_buffer_views,
+        "buffers": [{"byteLength": binary_size}],
+    }
+    for scene in result["scenes"]:
+        scene["nodes"] = [node_map[index] for index in scene.get("nodes", []) if index in kept_nodes]
+    for name, values in (("materials", materials), ("textures", textures), ("images", images), ("samplers", samplers)):
+        if values:
+            result[name] = values
+
+    json_payload = json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    json_payload += b" " * (-len(json_payload) % 4)
+    total_length = 12 + 8 + len(json_payload) + 8 + binary_size
+    temporary = path.with_suffix(".building-only.glb")
+    with path.open("rb") as source, temporary.open("wb") as target:
+        target.write(struct.pack("<4sII", b"glTF", 2, total_length))
+        target.write(struct.pack("<I4s", len(json_payload), b"JSON"))
+        target.write(json_payload)
+        target.write(struct.pack("<I4s", binary_size, b"BIN\x00"))
+        for old_index, view in zip(buffer_view_indices, new_buffer_views):
+            padding = view["byteOffset"] - (target.tell() - (12 + 8 + len(json_payload) + 8))
+            if padding:
+                target.write(b"\x00" * padding)
+            old_view = document["bufferViews"][old_index]
+            start = binary_offset + old_view.get("byteOffset", 0)
+            length = old_view["byteLength"]
+            if start + length > binary_offset + binary_length:
+                raise ValueError("GLB buffer view exceeds the binary chunk")
+            source.seek(start)
+            remaining = length
+            while remaining:
+                chunk = source.read(min(1024 * 1024, remaining))
+                if not chunk:
+                    raise ValueError("GLB binary chunk is truncated")
+                target.write(chunk)
+                remaining -= len(chunk)
+        target.write(b"\x00" * (binary_size - (target.tell() - (12 + 8 + len(json_payload) + 8))))
+    validation_error = _validate_rendered_model(temporary, "glb")
+    if validation_error:
+        temporary.unlink(missing_ok=True)
+        raise ValueError(validation_error)
+    os.replace(temporary, path)
+
+
 def _validate_rendered_model(path: Path, extension: str) -> str | None:
     """Return an error when a JSON-based OSM2World model is not valid UTF-8."""
     if extension not in {"glb", "gltf"}:
@@ -309,6 +544,9 @@ def render_osm2world(scene: SceneModel, output_directory, progress=None, jar=Non
     for stale_path in render_directory.glob("scene.*"):
         if stale_path.name != "scene.osm":
             stale_path.unlink(missing_ok=True)
+    # SceneModel remains the source of truth for roads, terrain, and water. The
+    # frontend renders those layers directly; OSM2World is only needed for the
+    # detailed building asset.
     osm_path = write_osm(scene, (render_directory / "scene.osm").resolve())
     output_directory = output_directory.resolve()
     render_directory = render_directory.resolve()
@@ -374,6 +612,19 @@ def render_osm2world(scene: SceneModel, output_directory, progress=None, jar=Non
                     errors.append(f"{extension}: {validation_error}")
                     output_path.unlink(missing_ok=True)
                     break
+                if extension != "glb":
+                    errors.append(f"{extension}: road-free visualization requires GLB output")
+                    output_path.unlink(missing_ok=True)
+                    continue
+                try:
+                    progress(0.96, "Removing roads from visualization asset")
+                    _compact_building_glb(output_path)
+                except (OSError, ValueError, KeyError, IndexError, json.JSONDecodeError) as error:
+                    errors.append(f"glb optimization: {error}")
+                    output_path.unlink(missing_ok=True)
+                    base["status"] = "failed"
+                    base["message"] = "OSM2World road-free optimization failed: " + str(error)
+                    return SceneRendering(**base)
                 relative_model = output_path.relative_to(output_directory).as_posix()
                 return SceneRendering(
                     renderer="osm2world",
@@ -382,7 +633,7 @@ def render_osm2world(scene: SceneModel, output_directory, progress=None, jar=Non
                     model_file=relative_model,
                     model_format=extension,
                     asset_version=asset_version,
-                    message="OSM2World model generated",
+                    message="OSM2World building-only model generated",
                 )
             details = (result.stderr or result.stdout or f"exit code {result.returncode}").strip()
             errors.append(f"{extension}: {details[-500:]}")
