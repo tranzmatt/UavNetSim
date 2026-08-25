@@ -11,6 +11,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, model_validator
 
 from api.runtime import RunSettings, runtime
+from path_planning import PlanningRequest, PlanningResult, available_planners, plan_trajectory
 from routing.parameters import ROUTING_PARAMETER_DEFINITIONS, resolve_routing_parameters
 from scene.compiler import compile_scene
 from scene.models import GeoBounds, SceneModel
@@ -152,6 +153,21 @@ def options():
         "traffic_pattern": ["Uniform", "Poisson"],
         "channel_mode": ["online", "hybrid", "offline"],
     }
+
+
+@app.get("/api/planners")
+def planners():
+    return available_planners()
+
+
+@app.post("/api/planning/plan", response_model=PlanningResult)
+def create_plan(request: PlanningRequest):
+    if _scene_build_in_progress():
+        raise HTTPException(409, "Wait for the current scene build to finish")
+    try:
+        return plan_trajectory(request, _scene_path())
+    except ValueError as error:
+        raise HTTPException(422, str(error)) from error
 
 
 @app.get("/api/scene", response_model=SceneModel)

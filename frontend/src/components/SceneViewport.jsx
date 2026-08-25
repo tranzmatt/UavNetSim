@@ -370,7 +370,11 @@ function placeOsm2WorldBuildings(object, scene) {
       child.visible = false
       return
     }
-    if (surfaceKind === 'road' || surfaceKind === 'water') {
+    if (surfaceKind === 'road') {
+      child.visible = false
+      return
+    }
+    if (surfaceKind === 'water') {
       if (hasOsm2WorldSurfaceAncestor(child, surfaceKind)) return
       const feature = featureForOsm2WorldObject(
         child,
@@ -548,6 +552,31 @@ function Drone({ node, selected, onSelect }) {
   )
 }
 
+function PlanningOverlay({ planning, onPoint }) {
+  const pathPoints = (planning.path || []).map((point) => [point.x, point.z, -point.y])
+  const pickAltitude = planning.activePick ? planning[planning.activePick].z : planning.start.z
+  const selectPoint = (event) => {
+    if (!planning.activePick || !onPoint) return
+    event.stopPropagation()
+    onPoint({
+      x: THREE.MathUtils.clamp(event.point.x, 0, planning.sizeX),
+      y: THREE.MathUtils.clamp(-event.point.z, 0, planning.sizeY),
+      z: pickAltitude,
+    })
+  }
+  return (
+    <group>
+      {pathPoints.length > 1 && <Line points={pathPoints} color="#46c8b0" lineWidth={3.2} transparent opacity={0.95} />}
+      {pathPoints.slice(1, -1).map((point, index) => <mesh key={index} position={point}><sphereGeometry args={[1.6, 10, 8]} /><meshBasicMaterial color="#9fe4d7" /></mesh>)}
+      {[['start', '#46c8b0'], ['goal', '#f3a63a']].map(([kind, color]) => {
+        const point = planning[kind]
+        return <group key={kind} position={[point.x, point.z, -point.y]}><mesh><sphereGeometry args={[4.4, 18, 14]} /><meshStandardMaterial color={color} emissive={color} emissiveIntensity={0.2} /></mesh><mesh position={[0, -point.z / 2, 0]}><cylinderGeometry args={[0.16, 0.16, point.z, 8]} /><meshBasicMaterial color={color} transparent opacity={0.35} /></mesh></group>
+      })}
+      {planning.activePick && <mesh position={[planning.sizeX / 2, pickAltitude, -planning.sizeY / 2]} rotation={[-Math.PI / 2, 0, 0]} onPointerDown={selectPoint}><planeGeometry args={[planning.sizeX, planning.sizeY]} /><meshBasicMaterial transparent opacity={0} depthWrite={false} side={THREE.DoubleSide} /></mesh>}
+    </group>
+  )
+}
+
 function PacketArc({ arc, nodes }) {
   const pulse = useRef()
   const source = nodes.find((node) => node.id === arc.source)
@@ -569,7 +598,7 @@ function PacketArc({ arc, nodes }) {
   return <group><Line points={curve.getPoints(30)} color={color} lineWidth={1.4} transparent opacity={0.7} /><mesh ref={pulse}><sphereGeometry args={[1.8, 10, 8]} /><meshBasicMaterial color={color} /></mesh></group>
 }
 
-export default function SceneViewport({ scene, nodes, arcs, selectedNode, onSelectNode }) {
+export default function SceneViewport({ scene, nodes, arcs, selectedNode, onSelectNode, planning, onPlanningPoint }) {
   const [modelFailed, setModelFailed] = useState(false)
   const [modelLoaded, setModelLoaded] = useState(false)
   const [modelLayers, setModelLayers] = useState({ road: false, water: false })
@@ -603,9 +632,9 @@ export default function SceneViewport({ scene, nodes, arcs, selectedNode, onSele
       {hasOsm2WorldModel && !modelFailed && <Osm2WorldModel scene={scene} onError={handleModelError} onReady={handleModelReady} />}
       {(!hasOsm2WorldModel || modelFailed || !modelLoaded) && scene.features.filter((feature) => feature.category === 'building').map((feature) => <Building key={feature.id} feature={feature} />)}
       {scene.features.filter((feature) => ((feature.category === 'water' && (!detailedModelActive || !modelLayers.water)) || (!scene.terrain && feature.category === 'terrain'))).map((feature) => <Surface key={feature.id} feature={feature} terrain={scene.terrain} sizeX={scene.size_x} sizeY={scene.size_y} />)}
-      {scene.features.filter((feature) => feature.category === 'road' && (!detailedModelActive || !modelLayers.road)).map((feature) => <Line key={feature.id} points={feature.footprint.map((point) => [point.x, (scene.terrain ? terrainHeightAt(scene.terrain, scene.size_x, scene.size_y, point.x, point.y) : point.z || 0) + 0.22, -point.y])} color="#697173" lineWidth={3} />)}
       {nodes.map((node) => <Drone key={node.id} node={node} selected={selectedNode === node.id} onSelect={onSelectNode} />)}
       {arcs.map((arc) => <PacketArc key={`${arc.id}-${arc.destination}`} arc={arc} nodes={nodes} />)}
+      {planning && <PlanningOverlay planning={{ ...planning, sizeX: scene.size_x, sizeY: scene.size_y }} onPoint={onPlanningPoint} />}
       <CameraTarget scene={scene} />
     </Canvas>
   )

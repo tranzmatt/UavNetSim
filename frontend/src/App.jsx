@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
-import { Activity, ChevronDown, CirclePause, CirclePlay, Gauge, MapPinned, RadioTower, Square, Terminal, Trash2, Zap } from 'lucide-react'
+import { Activity, ChevronDown, CirclePause, CirclePlay, Crosshair, Gauge, MapPinned, RadioTower, Route, Square, Terminal, Trash2, Zap } from 'lucide-react'
 import uavNetSimLogo from './assets/uavnetsim-logo.png'
 import ScenePicker from './components/ScenePicker'
 import SceneViewport from './components/SceneViewport'
+import PlanningControls from './components/PlanningControls'
 
 const EMPTY_METRICS = {
   generated: 0, delivered: 0, pdr_percent: 0, e2e_delay_ms: 0,
@@ -92,8 +93,10 @@ function eventTone(event) {
 }
 
 export default function App() {
+  const [mode, setMode] = useState('network')
   const [scene, setScene] = useState(null)
   const [options, setOptions] = useState({ routing: [], routing_parameters: {}, mac: [], mobility: [], traffic_pattern: [], channel_mode: [] })
+  const [planners, setPlanners] = useState([])
   const [state, setState] = useState({ status: 'idle', nodes: [], metrics: EMPTY_METRICS, sim_time_us: 0, duration_us: 20e6 })
   const [events, setEvents] = useState([])
   const [arcs, setArcs] = useState([])
@@ -101,6 +104,10 @@ export default function App() {
   const [scenePicker, setScenePicker] = useState(false)
   const [openLayers, setOpenLayers] = useState({ simulation: true, application: false, network: false, mac: false, physical: false })
   const [error, setError] = useState('')
+  const [activePick, setActivePick] = useState(null)
+  const [planningResult, setPlanningResult] = useState(null)
+  const [planningStatus, setPlanningStatus] = useState('idle')
+  const [planningLog, setPlanningLog] = useState([])
   const [panelLayout, setPanelLayout] = useState(DEFAULT_LAYOUT)
   const [settings, setSettings] = useState({
     seed: 2025, node_count: 8, duration_seconds: 20, playback_speed: 1, uav_speed_mps: 10,
@@ -113,14 +120,19 @@ export default function App() {
     sionna_refraction: false, sionna_diffraction: false, sionna_edge_diffraction: false,
     channel_snapshot_interval_ms: 100, channel_snapshot_displacement_m: 1,
   })
+  const [planningSettings, setPlanningSettings] = useState({
+    planner_id: 'astar_3d', start: { x: 90, y: 90, z: 60 }, goal: { x: 510, y: 510, z: 60 },
+    uav_speed_mps: 10, min_altitude_m: 1, max_altitude_m: 120, safety_clearance_m: 2,
+    parameter_values: {},
+  })
   const socketRef = useRef()
   const logStreamRef = useRef()
   const workspaceRef = useRef()
   const resizeCleanupRef = useRef()
 
   useEffect(() => {
-    Promise.all([fetch('/api/scene').then((response) => response.json()), fetch('/api/options').then((response) => response.json())])
-      .then(([loadedScene, loadedOptions]) => { setScene(loadedScene); setOptions(loadedOptions) })
+    Promise.all([fetch('/api/scene').then((response) => response.json()), fetch('/api/options').then((response) => response.json()), fetch('/api/planners').then((response) => response.json())])
+      .then(([loadedScene, loadedOptions, loadedPlanners]) => { setScene(loadedScene); setOptions(loadedOptions); setPlanners(loadedPlanners) })
       .catch((loadError) => setError(loadError.message))
     fetch('/api/simulation/state').then((response) => response.json()).then(setState)
   }, [])
@@ -133,6 +145,15 @@ export default function App() {
       uav_min_altitude_m: 0,
       uav_max_altitude_m: Math.ceil(terrainPeak + 120),
     }))
+    const cruiseAltitude = Math.ceil(terrainPeak + 60)
+    setPlanningSettings((current) => ({
+      ...current,
+      start: { x: Math.round(scene.size_x * 0.15), y: Math.round(scene.size_y * 0.15), z: cruiseAltitude },
+      goal: { x: Math.round(scene.size_x * 0.85), y: Math.round(scene.size_y * 0.85), z: cruiseAltitude },
+      min_altitude_m: 1,
+      max_altitude_m: Math.ceil(terrainPeak + 120),
+    }))
+    setPlanningResult(null)
   }, [scene])
 
   useEffect(() => () => resizeCleanupRef.current?.(), [])
@@ -233,6 +254,43 @@ export default function App() {
     }
   }
 
+  async function planTrajectory() {
+    setError('')
+    setPlanningStatus('planning')
+    setPlanningResult(null)
+    setPlanningLog((current) => [...current.slice(-39), { id: Date.now(), type: 'plan_started', message: `Planning with ${planningSettings.planner_id}`, tone: 'channel' }])
+    const definitions = planners.find((planner) => planner.id === planningSettings.planner_id)?.parameters || {}
+    const parameters = Object.fromEntries(Object.entries(definitions).map(([key, definition]) => [
+      key,
+      planningSettings.parameter_values[planningSettings.planner_id]?.[key] ?? definition.default,
+    ]))
+    try {
+      const response = await fetch('/api/planning/plan', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          planner_id: planningSettings.planner_id,
+          start: planningSettings.start,
+          goal: planningSettings.goal,
+          uav_speed_mps: planningSettings.uav_speed_mps,
+          min_altitude_m: planningSettings.min_altitude_m,
+          max_altitude_m: planningSettings.max_altitude_m,
+          safety_clearance_m: planningSettings.safety_clearance_m,
+          parameters,
+        }),
+      })
+      if (!response.ok) throw await responseError(response)
+      const result = await response.json()
+      setPlanningResult(result)
+      setPlanningStatus('ready')
+      setPlanningLog((current) => [...current.slice(-39), { id: Date.now(), type: 'plan_succeeded', message: `${result.path.length} waypoints / ${result.standard_metrics.path_length_m.toFixed(1)} m`, tone: 'succeeded' }])
+    } catch (requestError) {
+      setPlanningStatus('failed')
+      setError(requestError.message)
+      setPlanningLog((current) => [...current.slice(-39), { id: Date.now(), type: 'plan_failed', message: requestError.message, tone: 'failed' }])
+    }
+  }
+
   const metrics = { ...EMPTY_METRICS, ...(state.metrics || {}) }
   const selected = state.nodes.find((node) => node.id === selectedNode)
   const selectedSpeed = selected ? Math.hypot(...selected.velocity) : 0
@@ -259,6 +317,35 @@ export default function App() {
       },
     },
   }))
+  const setPlanningSetting = (key, value) => {
+    setPlanningSettings((current) => ({ ...current, [key]: value }))
+    setPlanningResult(null)
+    setPlanningStatus('idle')
+  }
+  const setPlanningPointCoordinate = (point, axis, value) => {
+    setPlanningSettings((current) => ({ ...current, [point]: { ...current[point], [axis]: value } }))
+    setPlanningResult(null)
+    setPlanningStatus('idle')
+  }
+  const setPlannerParameter = (key, value) => {
+    setPlanningSettings((current) => ({
+      ...current,
+      parameter_values: {
+        ...current.parameter_values,
+        [current.planner_id]: { ...current.parameter_values[current.planner_id], [key]: value },
+      },
+    }))
+    setPlanningResult(null)
+    setPlanningStatus('idle')
+  }
+  const selectPlanningPoint = (point) => {
+    if (!activePick) return
+    const rounded = Object.fromEntries(Object.entries(point).map(([axis, value]) => [axis, Math.round(value * 10) / 10]))
+    setPlanningSettings((current) => ({ ...current, [activePick]: rounded }))
+    setPlanningResult(null)
+    setPlanningStatus('idle')
+    setActivePick(activePick === 'start' ? 'goal' : null)
+  }
 
   function resizeLimits(kind, workspace, layout) {
     if (kind === 'left') return [280, Math.max(280, Math.min(480, workspace.width - layout.right - 360))]
@@ -311,13 +398,20 @@ export default function App() {
       <header className="topbar">
         <div className="brand"><img className="brand-logo" src={uavNetSimLogo} alt="UavNetSim" /></div>
         <div className="run-controls">
-          <button className="primary-button" disabled={ACTIVE_STATUSES.includes(state.status)} onClick={startSimulation}><CirclePlay size={17} /> Run</button>
-          <button className="icon-button" title={state.status === 'paused' ? 'Resume simulation' : 'Pause simulation'} disabled={!['running', 'paused'].includes(state.status)} onClick={() => command(state.status === 'paused' ? '/api/simulation/resume' : '/api/simulation/pause')}>
-            {state.status === 'paused' ? <CirclePlay size={18} /> : <CirclePause size={18} />}
-          </button>
-          <button className="icon-button" title="Stop simulation" disabled={!['running', 'paused', 'starting', 'preparing'].includes(state.status)} onClick={() => command('/api/simulation/stop')}><Square size={16} /></button>
+          <div className="workspace-mode" aria-label="Workspace mode">
+            <button type="button" className={mode === 'network' ? 'active' : ''} disabled={settingsLocked} onClick={() => { setMode('network'); setActivePick(null) }}>Network</button>
+            <button type="button" className={mode === 'planning' ? 'active' : ''} disabled={settingsLocked} onClick={() => setMode('planning')}>Trajectory</button>
+          </div>
+          {mode === 'network' && <>
+            <button className="primary-button" disabled={ACTIVE_STATUSES.includes(state.status)} onClick={startSimulation}><CirclePlay size={17} /> Run</button>
+            <button className="icon-button" title={state.status === 'paused' ? 'Resume simulation' : 'Pause simulation'} disabled={!['running', 'paused'].includes(state.status)} onClick={() => command(state.status === 'paused' ? '/api/simulation/resume' : '/api/simulation/pause')}>{state.status === 'paused' ? <CirclePlay size={18} /> : <CirclePause size={18} />}</button>
+            <button className="icon-button" title="Stop simulation" disabled={!['running', 'paused', 'starting', 'preparing'].includes(state.status)} onClick={() => command('/api/simulation/stop')}><Square size={16} /></button>
+          </>}
+          {mode === 'planning' && <button className="primary-button" disabled={planningStatus === 'planning'} onClick={planTrajectory}><Route size={17} /> Plan</button>}
         </div>
-        <div className="run-status"><i className={state.status} /><span>{statusLabel}</span><b>{statusValue}</b></div>
+        {mode === 'network'
+          ? <div className="run-status"><i className={state.status} /><span>{statusLabel}</span><b>{statusValue}</b></div>
+          : <div className="run-status"><i className={planningStatus === 'ready' ? 'running' : planningStatus} /><span>{planningStatus}</span><b>{planningResult ? `${planningResult.path.length} PTS` : 'PLAN'}</b></div>}
       </header>
 
       <section className="workspace" ref={workspaceRef}>
@@ -332,6 +426,7 @@ export default function App() {
             <small>{buildings} structures{scene.terrain ? ` / ${terrainRelief.toFixed(0)} m relief` : ''}</small>
           </div>
           <div className="layer-stack">
+            {mode === 'network' ? <>
             <LayerSection index="01" title="SIMULATION / UAV" open={openLayers.simulation} disabled={settingsLocked} onToggle={() => toggleLayer('simulation')}>
               <div className="field-row"><Field label="Nodes"><input type="number" min="2" max="50" value={settings.node_count} onChange={(event) => setSetting('node_count', Number(event.target.value))} /></Field><Field label="Duration"><div className="input-unit"><input type="number" min="1" max="3600" value={settings.duration_seconds} onChange={(event) => setSetting('duration_seconds', Number(event.target.value))} /><span>s</span></div></Field></div>
               <Field label="Mobility model"><select value={settings.mobility} onChange={(event) => setSetting('mobility', event.target.value)}>{options.mobility.map((item) => <option key={item}>{item}</option>)}</select></Field>
@@ -376,26 +471,53 @@ export default function App() {
                 <Toggle label="Edge diffraction" checked={settings.sionna_edge_diffraction} onChange={(value) => setSetting('sionna_edge_diffraction', value)} />
               </div>
             </LayerSection>
+            </> : <PlanningControls
+              planners={planners}
+              settings={planningSettings}
+              activePick={activePick}
+              planning={planningStatus === 'planning'}
+              onSettings={setPlanningSetting}
+              onPoint={setPlanningPointCoordinate}
+              onParameter={setPlannerParameter}
+              onPick={(point) => setActivePick((current) => current === point ? null : point)}
+              onPlan={planTrajectory}
+            />}
           </div>
         </aside>
 
         <section className="viewport" aria-label="3D simulation scene">
-          <SceneViewport scene={scene} nodes={state.nodes} arcs={arcs} selectedNode={selectedNode} onSelectNode={setSelectedNode} />
-          {selected && <div className="node-inspector"><button onClick={() => setSelectedNode(null)} title="Close">x</button><small>UAV {String(selected.id).padStart(2, '0')}</small><strong>{selected.energy_j.toFixed(0)} J</strong><span>X {selected.position[0].toFixed(1)} &nbsp; Y {selected.position[1].toFixed(1)} &nbsp; Z {selected.position[2].toFixed(1)}</span><span>Speed {selectedSpeed.toFixed(1)} m/s &nbsp; Queue {selected.queue_size}</span></div>}
+          <SceneViewport
+            scene={scene}
+            nodes={mode === 'network' ? state.nodes : []}
+            arcs={mode === 'network' ? arcs : []}
+            selectedNode={selectedNode}
+            onSelectNode={setSelectedNode}
+            planning={mode === 'planning' ? { start: planningSettings.start, goal: planningSettings.goal, path: planningResult?.path || [], activePick } : null}
+            onPlanningPoint={selectPlanningPoint}
+          />
+          {mode === 'network' && selected && <div className="node-inspector"><button onClick={() => setSelectedNode(null)} title="Close">x</button><small>UAV {String(selected.id).padStart(2, '0')}</small><strong>{selected.energy_j.toFixed(0)} J</strong><span>X {selected.position[0].toFixed(1)} &nbsp; Y {selected.position[1].toFixed(1)} &nbsp; Z {selected.position[2].toFixed(1)}</span><span>Speed {selectedSpeed.toFixed(1)} m/s &nbsp; Queue {selected.queue_size}</span></div>}
+          {mode === 'planning' && activePick && <div className="pick-hint"><Crosshair size={15} />Click the scene to set {activePick.toUpperCase()} at Z {planningSettings[activePick].z.toFixed(0)} m</div>}
         </section>
 
-        <section className="log-panel" aria-label="Network runtime log">
+        <section className="log-panel" aria-label={mode === 'network' ? 'Network runtime log' : 'Planning log'}>
           <div className="log-toolbar">
-            <span><Terminal size={15} /> NETWORK LOG</span>
-            <div><small>{events.length} EVENTS</small><button type="button" title="Clear network log" aria-label="Clear network log" onClick={() => setEvents([])}><Trash2 size={14} /></button></div>
+            <span><Terminal size={15} /> {mode === 'network' ? 'NETWORK LOG' : 'PLANNING LOG'}</span>
+            <div><small>{mode === 'network' ? events.length : planningLog.length} EVENTS</small><button type="button" title="Clear log" aria-label="Clear log" onClick={() => mode === 'network' ? setEvents([]) : setPlanningLog([])}><Trash2 size={14} /></button></div>
           </div>
           <div className="log-stream" ref={logStreamRef}>
-            {events.length === 0 && <div className="log-empty">Waiting for simulation events...</div>}
-            {events.map((event) => <div key={event.sequence} className={`log-line ${eventTone(event)}`}><time>{(event.sim_time_us / 1e6).toFixed(3)}</time><code>{event.event_type}</code><span>{formatEvent(event)}</span></div>)}
+            {mode === 'network' && <>
+              {events.length === 0 && <div className="log-empty">Waiting for simulation events...</div>}
+              {events.map((event) => <div key={event.sequence} className={`log-line ${eventTone(event)}`}><time>{(event.sim_time_us / 1e6).toFixed(3)}</time><code>{event.event_type}</code><span>{formatEvent(event)}</span></div>)}
+            </>}
+            {mode === 'planning' && <>
+              {planningLog.length === 0 && <div className="log-empty">Set a start and goal, then plan a trajectory.</div>}
+              {planningLog.map((entry) => <div key={entry.id} className={`log-line ${entry.tone}`}><time>PLAN</time><code>{entry.type}</code><span>{entry.message}</span></div>)}
+            </>}
           </div>
         </section>
 
         <aside className="right-panel">
+          {mode === 'network' ? <>
           <div className="panel-heading"><span><Activity size={16} /> NETWORK</span><small>{state.status === 'preparing' ? 'PREP' : ACTIVE_STATUSES.includes(state.status) ? 'LIVE' : 'LATEST'}</small></div>
           <div className="metric-primary"><span>PDR</span><strong>{metrics.pdr_percent.toFixed(1)}<small>%</small></strong><div className="meter"><i style={{ width: `${metrics.pdr_percent}%` }} /></div></div>
           <div className="metric-grid">
@@ -412,6 +534,20 @@ export default function App() {
           <div className="node-list node-list--telemetry">
             {state.nodes.map((node) => <button key={node.id} className={selectedNode === node.id ? 'selected' : ''} onClick={() => setSelectedNode(node.id)}><i /><span>UAV {String(node.id).padStart(2, '0')}</span><small>{node.position[2].toFixed(0)} m</small></button>)}
           </div>
+          </> : <>
+            <div className="panel-heading"><span><Route size={16} /> TRAJECTORY</span><small>{planningStatus.toUpperCase()}</small></div>
+            <div className="metric-primary planning-primary"><span>PATH LENGTH</span><strong>{planningResult ? planningResult.standard_metrics.path_length_m.toFixed(1) : '--'}<small>m</small></strong><div className="meter"><i style={{ width: planningResult ? '100%' : '0%' }} /></div></div>
+            <div className="metric-grid">
+              <Metric label="Flight time" value={planningResult ? planningResult.standard_metrics.estimated_flight_time_s.toFixed(1) : '--'} unit="s" />
+              <Metric label="Planning time" value={planningResult ? planningResult.standard_metrics.planning_time_ms.toFixed(1) : '--'} unit="ms" />
+              <Metric label="Waypoints" value={planningResult ? planningResult.standard_metrics.waypoint_count : '--'} unit="points" tone="success" />
+              <Metric label="Expanded" value={planningResult ? planningResult.diagnostics.expanded_nodes : '--'} unit="nodes" />
+            </div>
+            <div className="plan-summary">
+              <div className="panel-heading"><span>MISSION</span></div>
+              <dl><dt>Start</dt><dd>{planningSettings.start.x.toFixed(0)}, {planningSettings.start.y.toFixed(0)}, {planningSettings.start.z.toFixed(0)}</dd><dt>Goal</dt><dd>{planningSettings.goal.x.toFixed(0)}, {planningSettings.goal.y.toFixed(0)}, {planningSettings.goal.z.toFixed(0)}</dd><dt>Planner</dt><dd>{planners.find((item) => item.id === planningSettings.planner_id)?.name || planningSettings.planner_id}</dd></dl>
+            </div>
+          </>}
         </aside>
 
         <div className="resize-handle resize-handle--left" role="separator" aria-label="Resize configuration panel" aria-orientation="vertical" tabIndex="0" title="Drag to resize configuration panel" onPointerDown={(event) => startResize('left', event)} onKeyDown={(event) => resizeWithKeyboard('left', event)} onDoubleClick={() => setPanelLayout((current) => ({ ...current, left: DEFAULT_LAYOUT.left }))} />
@@ -419,7 +555,9 @@ export default function App() {
         <div className="resize-handle resize-handle--log" role="separator" aria-label="Resize network log" aria-orientation="horizontal" tabIndex="0" title="Drag to resize network log" onPointerDown={(event) => startResize('log', event)} onKeyDown={(event) => resizeWithKeyboard('log', event)} onDoubleClick={() => setPanelLayout((current) => ({ ...current, log: DEFAULT_LAYOUT.log }))} />
       </section>
 
-      <footer className="timeline"><span>{state.status === 'preparing' ? 'TRACE' : `${((state.sim_time_us || 0) / 1e6).toFixed(2)} s`}</span><div><i style={{ width: `${progress}%` }} /></div><span>{state.status === 'preparing' ? `${state.preparation?.completed || 0}/${state.preparation?.total || 0}` : `${settings.duration_seconds.toFixed(0)} s`}</span><b><Zap size={14} /> PHY {metrics.phy_success_percent.toFixed(0)}%</b></footer>
+      {mode === 'network'
+        ? <footer className="timeline"><span>{state.status === 'preparing' ? 'TRACE' : `${((state.sim_time_us || 0) / 1e6).toFixed(2)} s`}</span><div><i style={{ width: `${progress}%` }} /></div><span>{state.status === 'preparing' ? `${state.preparation?.completed || 0}/${state.preparation?.total || 0}` : `${settings.duration_seconds.toFixed(0)} s`}</span><b><Zap size={14} /> PHY {metrics.phy_success_percent.toFixed(0)}%</b></footer>
+        : <footer className="timeline planning-footer"><span>{planningStatus.toUpperCase()}</span><div><i style={{ width: planningStatus === 'planning' ? '55%' : planningResult ? '100%' : '0%' }} /></div><span>{planningResult ? `${planningResult.path.length} points` : 'No result'}</span><b><Route size={14} /> {planners.find((item) => item.id === planningSettings.planner_id)?.name || 'PLANNER'}</b></footer>}
       {error && <div className="toast" role="alert">{error}<button onClick={() => setError('')}>x</button></div>}
       {scenePicker && <ScenePicker scene={scene} onClose={() => setScenePicker(false)} onScene={setScene} />}
     </main>
