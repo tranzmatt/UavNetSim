@@ -143,97 +143,16 @@ cd ..
 .venv/Scripts/python.exe main.py serve --host 127.0.0.1 --port 8000
 ```
 
-## Features
-Before you start your simulation journey, we recommend that you read this section first, in which some features of this platform are mentioned so that you can decide if this platform meets your development or research needs.
-- Python-based (this simulation platform is developed based on SimPy library in Python);
-- More suitable for the development and verification of **routing protocols**, **MAC protocols**, and **motion control algorithms** (e.g., **topology control**, **trajectory optimization**). In the future, we hope to improve the platform to support more kinds of algorithms and protocols at different layers;
-- Support **reinforcement learning (RL)** and other AI-based algorithms;
-- Easy to extend (1. **modular programming** is used, and users can easily add their own designed modules; 2. different application scenarios are possible, e.g., **flying ad-hoc networks (FANETs)**, **UAV-assisted data collection**, **air-ground integrated network**);
-- **Good visulization**, this platform can provide the visualization of **UAV flight trajectory** and **packet forwarding path**, which facilitates intuitive analysis of the behavior of protocols;
-- If you are engaged in UAV-assisted wireless communication systems and want to **consider more cross-layer metrics** (e.g., end-to-end delay, packet delivery ratio (PDR), throughput), then this platform is for you
+## Currently supported features
 
-## Project structure
-
-```
-.
-├── README.md
-├── allocation
-│   ├── central_controller.py
-│   └── channel_assignment.py
-├── energy
-│   └── energy_model.py
-├── entities
-│   ├── drone.py
-│   ├── obstacle.py
-│   └── packet.py
-├── mac
-│   ├── csma_ca.py
-│   └── pure_aloha.py
-├── mobility
-│   ├── gauss_markov_3d.py
-│   ├── random_walk_3d.py
-│   ├── random_waypoint_3d.py
-│   └── start_coords.py
-├── path_planning
-│   ├── astar
-│   │   └── astar.py
-├── phy
-│   ├── channel.py
-│   ├── large_scale_fading.py
-│   └── phy.py
-├── routing
-│   ├── dsdv
-│   │   ├── dsdv.py
-│   │   ├── dsdv_packet.py
-│   │   └── dsdv_routing_table.py
-│   ├── grad
-│   │   └── ...
-│   ├── greedy
-│   │   └── ...
-│   ├── opar
-│   │   └── ...
-│   └── q_routing
-│       └── ...
-├── simulator
-│   ├── metrics.py
-│   └── simulator.py
-├── topology
-│   └── virtual_force
-│       ├── vf_motion_control.py
-│       ├── vf_neighbor_table.py
-│       └── vf_packet.py
-├── utils
-│   ├── config.py
-│   ├── ieee_802_11.py
-│   └── util_function.py
-├── visualization
-│   ├── static_drawing.py
-│   └── visualizer.py
-└── main.py
-```
-The entry point of this project is the ```main.py``` file, we can even run it directly with one click to get a sneak peek, however, we recommend that you first read this section to understand the modular composition of this simulation platform and the corresponding function.
-
-- ```allocation```: this package includes modules for various resource allocation algorithms, e.g., sub-channel assignment schemes. Power allocation can be implemented as future work.
-- ```energy```: this package includes the drone's energy model, covering both flight and communication-related energy consumption.
-- ```entities```: it encompasses all modules corresponding to the primary entities involved in the simulation.
-- ```mac```: it includes the implementations of different medium access control protocols.
-- ```mobility```: it contains different 3-D mobility models of drones.
-- ```path_planning```: this package includes modules for different 3D path planning algorithms (e.g., A*) for drone.
-- ```phy```: it mainly includes the modeling of wireless channels in the physical layer, and the definition of unicast, broadcast, and multicast.
-- ```routing```: it includes implementations of various routing protocols.
-- ```simulator```: it comprises all the classes necessary for conducting the simulation and evaluating network performance metrics.
-- ```topology```: this package includes modules for various topology control algorithms for UAV swarm.
-- ```utils```: it contains the key configuration parameters and some useful functions.
-- ```visualization```: it can provide visualization of the distribution of drones, flight trajectory and the packet forwarding paths.
-
-| Layer | Currently implemented protocols, algorithms or models |
-| --- | --- |
-| Application layer | Uniform distribution for data packet arrival <br> Poisson distribution for data packet arrival |
-| Transport layer | Automatic repeat request (ARQ) |
-| Network layer | Routing protocols: <br> <ul><li>[DSDV: Destination-Sequenced Distance-Vector routing](https://dl.acm.org/doi/abs/10.1145/190809.190336)</li> <li>[GRAd: Gradient Routing in Ad Hoc Networks](www.media.mit.edu/pia/Research/ESP/texts/poorieeepaper.pdf)</li> <li>[Greedy forwarding](https://en.wikipedia.org/wiki/Geographic_routing)</li> <li>[OPAR: Optimized Predictive and Adaptive Routing](https://ieeexplore.ieee.org/abstract/document/9484489)</li> <li>[Q-FANET: Improved Q-learning based Routing Protocol for FANETs](https://www.sciencedirect.com/science/article/abs/pii/S1389128621003595)</li> <li>[QMR: Q-learning based Multi-objective optimization Routing](https://hal.science/hal-02970649v1/document)</li> <li>[QGeo: Q-learning-based Geographic routing](https://ieeexplore.ieee.org/abstract/document/7829268/)</li> <li>[Classical Q-Routing](https://proceedings.neurips.cc/paper/1993/hash/4ea06fbc83cdd0a06020c35d50e1e89a-Abstract.html)</li></ul>|
-| Topology control layer | Random mobility models: <br> <ul><li>[3D Gauss-Markov mobility model](https://repository.arizona.edu/bitstream/handle/10150/604297/ITC_2010_10-03-06.pdf?sequence=1&isAllowed=y)</li><li>[3D Random Waypoint mobility model](https://ieeexplore.ieee.org/document/8671460)</li><li>[3D Random Walk mobility model](https://link.springer.com/chapter/10.1007/978-1-4419-6050-4_3#citeas)</li></ul> Topology control algorithms: <br> <ul><li>[Virtual force-based topology control](https://ieeexplore.ieee.org/document/5555924)</li></ul> Path planning and obstacle avoidance algorithms: <br> <ul><li>A* 3D path planning</li></ul>|
-| Medium access control layer |<ul><li>[CSMA/CA: Carrier-Sense Multiple Access with Collision Avoidance](https://en.wikipedia.org/wiki/Carrier-sense_multiple_access_with_collision_avoidance)</li> <li>[Pure ALOHA](https://www.tutorialspoint.com/data_communication_computer_network/pure_aloha.htm)</li> <li>[Time-Division Multiple Access](https://en.wikipedia.org/wiki/Time-division_multiple_access)</li> </ul>|
-| Physical layer | The characteristics in physical layer that taken into account: <br> <ul><li>Line-of-Sight (LoS) channel</li> <li>Probabilistic Line-of-Sight (LoS) channel</li> <li>Packet collisions and signal interference</li> <li>Unicast, multicast and broadcast</li></ul> |
+| Layer | Currently implemented protocols, algorithms or models                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| --- |--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Application layer | Uniform distribution for data packet arrival <br> Poisson distribution for data packet arrival                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| Transport layer | Automatic repeat request (ARQ)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| Network layer | Routing protocols: <br> <ul><li>[DSDV: Destination-Sequenced Distance-Vector routing](https://dl.acm.org/doi/abs/10.1145/190809.190336)</li> <li>[GRAd: Gradient Routing in Ad Hoc Networks](www.media.mit.edu/pia/Research/ESP/texts/poorieeepaper.pdf)</li> <li>[Greedy forwarding](https://en.wikipedia.org/wiki/Geographic_routing)</li> <li>[OPAR: Optimized Predictive and Adaptive Routing](https://ieeexplore.ieee.org/abstract/document/9484489)</li> <li>[Q-FANET: Improved Q-learning based Routing Protocol for FANETs](https://www.sciencedirect.com/science/article/abs/pii/S1389128621003595)</li> <li>[QMR: Q-learning based Multi-objective optimization Routing](https://hal.science/hal-02970649v1/document)</li> <li>[QGeo: Q-learning-based Geographic routing](https://ieeexplore.ieee.org/abstract/document/7829268/)</li> <li>[Classical Q-Routing](https://proceedings.neurips.cc/paper/1993/hash/4ea06fbc83cdd0a06020c35d50e1e89a-Abstract.html)</li></ul> |
+| Topology control layer | Random mobility models: <br> <ul><li>[3D Gauss-Markov mobility model](https://repository.arizona.edu/bitstream/handle/10150/604297/ITC_2010_10-03-06.pdf?sequence=1&isAllowed=y)</li><li>[3D Random Waypoint mobility model](https://ieeexplore.ieee.org/document/8671460)</li><li>[3D Random Walk mobility model](https://link.springer.com/chapter/10.1007/978-1-4419-6050-4_3#citeas)</li></ul> Topology control algorithms: <br> <ul><li>[Virtual force-based topology control](https://ieeexplore.ieee.org/document/5555924)</li></ul> Path planning and obstacle avoidance algorithms: <br> <ul><li>A* 3D path planning</li></ul>                                                                                                                                                                                                                                                                                                                                              |
+| Medium access control layer | <ul><li>[CSMA/CA: Carrier-Sense Multiple Access with Collision Avoidance](https://en.wikipedia.org/wiki/Carrier-sense_multiple_access_with_collision_avoidance)</li> <li>[Pure ALOHA](https://www.tutorialspoint.com/data_communication_computer_network/pure_aloha.htm)</li> <li>[Time-Division Multiple Access](https://en.wikipedia.org/wiki/Time-division_multiple_access)</li> </ul>                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| Physical layer | The characteristics in physical layer that taken into account: <br> <ul><li>NVIDIA SionnaRT-based ray-tracing channel</li> <li>Hybrid RT channel</li> <li>Packet collisions and signal interference</li> <li>Unicast, multicast and broadcast</li></ul>                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 
 ## Core logic
 The following figure shows the main procedure of packet transmissions in *UavNetSim*. "Drone's buffer" is a resource in SimPy whose capacity is one, which means that the drone can send at most one packet at a time. If there are many packets that need to be transmitted, they need to queue for buffer resources according to the time order of arrival to the drone. We can simulate the queuing delay by this mechanism. Besides, we note that there are two other containers: ```transmitting_queue``` and ```waiting_list```, for all the "data packets" and "control packets" generated by the drone itself or received from other drones but need to be further forwarded, the drone will first put them into the ```transmitting_queue```. A function called ```feed_packet``` will periodically read the packet at the head of the ```transmitting_queue``` every very short time, and let it wait for the ```buffer``` resource. It should be noted that the "ACK packet" waits for the buffer resource directly without being put into the ```transmitting_queue```.
