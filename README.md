@@ -36,7 +36,26 @@ This repository corresponds to our following paper. In addition, we have also up
 > <sup>5</sup> Yonsei Frontier Lab, Yonsei University
 
 ## Requirements
-To be updated...
+
+- Python 3.11 or later (Python 3.12 is recommended)
+- Git
+- Node.js 18 or later and npm, for building the web console
+
+The editable install used below reads `pyproject.toml` and automatically
+installs all core Python dependencies; a separate
+`pip install -r requirements.txt` step is not required. Optional dependency
+groups can be installed when needed:
+
+```powershell
+# Deep-reinforcement-learning modules
+.\.venv\Scripts\python.exe -m pip install -e ".[drl]"
+
+# Test suite
+.\.venv\Scripts\python.exe -m pip install -e ".[test]"
+```
+
+Java 17 and OSM2World are optional and are only needed for detailed scene
+rendering; see [OSM2World detailed rendering](#osm2world-detailed-rendering-optional).
 
 ## Quick Start
 ```
