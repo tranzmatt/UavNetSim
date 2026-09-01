@@ -4,9 +4,6 @@ from dataclasses import dataclass
 
 import simpy
 
-from mobility.trajectory import TraceBuildCancelled, generate_trajectory
-from phy.offline_trace import build_or_load_channel_trace
-from scene.airspace import Airspace
 from simulator.simulator import Simulator
 from telemetry import EventBus
 from utils import config
@@ -29,6 +26,9 @@ class RunSettings:
     mac: str
     mobility: str
     channel_mode: str
+    los_a2a_model: str
+    nlos_a2a_model: str
+    calibration_profile: str | None
     samples_per_source: int
     sionna_max_depth: int
     sionna_frequency_samples: int
@@ -80,6 +80,9 @@ class SimulationRuntime:
             config.MAC_PROTOCOL = self.settings.mac
             config.MOBILITY_MODEL = self.settings.mobility
             config.CHANNEL_MODE = self.settings.channel_mode
+            config.LOS_A2A_MODEL = self.settings.los_a2a_model
+            config.NLOS_A2A_MODEL = self.settings.nlos_a2a_model
+            config.CALIBRATION_PROFILE = self.settings.calibration_profile
             config.NUMBER_OF_DRONES = self.settings.node_count
             config.UAV_SPEED = self.settings.uav_speed_mps
             config.UAV_MIN_ALTITUDE = self.settings.uav_min_altitude_m
@@ -101,57 +104,6 @@ class SimulationRuntime:
             config.CHANNEL_SNAPSHOT_INTERVAL = self.settings.channel_snapshot_interval_ms * 1e3
             config.CHANNEL_SNAPSHOT_DISPLACEMENT = self.settings.channel_snapshot_displacement_m
             duration_us = self.settings.duration_seconds * 1e6
-            trajectory_trace = None
-            channel_trace = None
-            if config.CHANNEL_MODE == "offline":
-                self.status = "preparing"
-                self.preparation = {
-                    "phase": "trajectory",
-                    "completed": 0,
-                    "total": 0,
-                    "cache_hit": False,
-                }
-                self.event_bus.publish("channel_trajectory_started", 0)
-                scene_path = config.PROJECT_ROOT / "artifacts" / "scene" / "scene.json"
-                airspace = Airspace.from_file(
-                    scene_path,
-                    max_height=config.MAP_HEIGHT,
-                    building_clearance=config.UAV_BUILDING_CLEARANCE,
-                    boundary_clearance=config.UAV_BOUNDARY_CLEARANCE,
-                    min_flight_height=config.UAV_MIN_ALTITUDE,
-                    max_flight_height=config.UAV_MAX_ALTITUDE,
-                )
-                config.MAP_LENGTH = airspace.size_x
-                config.MAP_WIDTH = airspace.size_y
-                config.MAP_HEIGHT = airspace.max_height
-                trajectory_trace = generate_trajectory(
-                    seed=self.settings.seed,
-                    node_count=self.settings.node_count,
-                    duration_us=duration_us,
-                    drone_speed=self.settings.uav_speed_mps,
-                    airspace=airspace,
-                    stop_event=self._stop,
-                )
-                self.event_bus.publish(
-                    "channel_trajectory_ready", 0, samples=len(trajectory_trace.times_us)
-                )
-
-                def update_trace_progress(completed, total, cache_hit):
-                    self.preparation = {
-                        "phase": "channel_trace",
-                        "completed": completed,
-                        "total": total,
-                        "cache_hit": cache_hit,
-                    }
-
-                channel_trace = build_or_load_channel_trace(
-                    trajectory_trace,
-                    self.event_bus,
-                    stop_event=self._stop,
-                    progress=update_trace_progress,
-                )
-                if self._stop.is_set():
-                    raise TraceBuildCancelled()
             simulator = Simulator(
                 seed=self.settings.seed,
                 env=environment,
@@ -159,8 +111,6 @@ class SimulationRuntime:
                 total_simulation_time=duration_us,
                 event_bus=self.event_bus,
                 drone_speed=self.settings.uav_speed_mps,
-                trajectory_trace=trajectory_trace,
-                channel_trace=channel_trace,
             )
             self.simulator = simulator
             self.preparation = None
@@ -181,9 +131,6 @@ class SimulationRuntime:
                 self.event_bus.publish("simulation_stopped", environment.now)
             else:
                 final_status = "completed"
-        except TraceBuildCancelled:
-            final_status = "stopped"
-            self.event_bus.publish("simulation_stopped", environment.now)
         except BaseException as error:
             self.error = f"{type(error).__name__}: {error}"
             final_status = "failed"

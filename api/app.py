@@ -12,6 +12,8 @@ from pydantic import BaseModel, Field, model_validator
 
 from api.runtime import RunSettings, runtime
 from path_planning import PlanningRequest, PlanningResult, available_planners, plan_trajectory
+from phy.a2a import LOS_MODELS, NLOS_MODELS, calibration_root, profile_fingerprint
+from phy.calibration import calibration_runtime
 from routing.parameters import ROUTING_PARAMETER_DEFINITIONS, resolve_routing_parameters
 from scene.compiler import compile_scene
 from scene.models import GeoBounds, SceneModel
@@ -35,7 +37,10 @@ class StartRequest(BaseModel):
     routing_parameters: dict[str, float] = Field(default_factory=dict)
     mac: str = "CSMA_CA"
     mobility: str = "GaussMarkov3D"
-    channel_mode: Literal["online", "hybrid", "offline"] = "online"
+    channel_mode: Literal["online", "hybrid", "on_demand", "a2a"] = "online"
+    los_a2a_model: Literal["free_space", "log_distance"] = "free_space"
+    nlos_a2a_model: Literal["urban", "suburban"] = "urban"
+    calibration_profile: str | None = None
     samples_per_source: int = Field(default=100000, ge=100, le=10000000)
     sionna_max_depth: int = Field(default=4, ge=0, le=32)
     sionna_frequency_samples: int = Field(default=32, ge=1, le=4096)
@@ -47,6 +52,8 @@ class StartRequest(BaseModel):
     sionna_edge_diffraction: bool = False
     channel_snapshot_interval_ms: float = Field(default=100, gt=0, le=60000)
     channel_snapshot_displacement_m: float = Field(default=1, gt=0, le=1000)
+    calibration_links: int = Field(default=5000, ge=100, le=1000000)
+    calibration_coverage: float = Field(default=0.95, ge=0.8, lt=1.0)
 
     @model_validator(mode="after")
     def validate_altitude_range(self):
@@ -57,6 +64,10 @@ class StartRequest(BaseModel):
         ):
             raise ValueError("Maximum UAV altitude must be greater than minimum UAV altitude")
         return self
+
+
+class CalibrationRequest(StartRequest):
+    pass
 
 
 class OsmImportRequest(BaseModel):
@@ -151,7 +162,9 @@ def options():
         "mac": ["CSMA_CA", "Pure_Aloha", "TDMA"],
         "mobility": ["GaussMarkov3D", "RandomWalk3D", "RandomWaypoint3D"],
         "traffic_pattern": ["Uniform", "Poisson"],
-        "channel_mode": ["online", "hybrid", "offline"],
+        "channel_mode": ["online", "hybrid", "on_demand", "a2a"],
+        "los_a2a_model": list(LOS_MODELS),
+        "nlos_a2a_model": list(NLOS_MODELS),
     }
 
 
@@ -179,6 +192,8 @@ def get_scene():
 def import_scene(scene: SceneModel):
     if runtime.status in {"running", "paused", "starting", "preparing", "stopping"}:
         raise HTTPException(409, "Stop the simulation before changing the scene")
+    if calibration_runtime.status in {"queued", "running"}:
+        raise HTTPException(409, "Wait for calibration to finish before changing the scene")
     if _scene_build_in_progress():
         raise HTTPException(409, "Wait for the current scene build to finish")
     return _activate_scene(scene)
@@ -188,6 +203,8 @@ def import_scene(scene: SceneModel):
 def import_osm(request: OsmImportRequest, background_tasks: BackgroundTasks):
     if runtime.status in {"running", "paused", "starting", "preparing", "stopping"}:
         raise HTTPException(409, "Stop the simulation before changing the scene")
+    if calibration_runtime.status in {"queued", "running"}:
+        raise HTTPException(409, "Wait for calibration to finish before changing the scene")
     with scene_build_lock:
         if any(build.status in {"queued", "running"} for build in scene_builds.values()):
             raise HTTPException(409, "Another scene is already being built")
@@ -210,8 +227,24 @@ def scene_build_state(build_id: str):
 def start_simulation(request: StartRequest):
     if _scene_build_in_progress():
         raise HTTPException(409, "Wait for the current scene build to finish")
+    if calibration_runtime.status in {"queued", "running"}:
+        raise HTTPException(409, "Wait for calibration to finish")
     try:
+        _apply_channel_settings(request)
+        if request.channel_mode == "on_demand":
+            expected_profile = profile_fingerprint(
+                request.los_a2a_model,
+                request.nlos_a2a_model,
+                _calibration_domain(request),
+            )
+            if request.calibration_profile != expected_profile:
+                raise ValueError("On-demand mode requires a matching calibration profile")
+            profile_path = calibration_root() / expected_profile / "interval-table.json"
+            if not profile_path.is_file():
+                raise ValueError("The selected calibration profile does not exist")
         settings = request.model_dump()
+        settings.pop("calibration_links")
+        settings.pop("calibration_coverage")
         settings["routing_parameters"] = resolve_routing_parameters(
             request.routing,
             request.routing_parameters,
@@ -220,6 +253,65 @@ def start_simulation(request: StartRequest):
     except (RuntimeError, ValueError) as error:
         raise HTTPException(409, str(error)) from error
     return runtime.state()
+
+
+def _apply_channel_settings(request):
+    config.SIONNA_SAMPLES_PER_SOURCE = request.samples_per_source
+    config.SIONNA_MAX_DEPTH = request.sionna_max_depth
+    config.SIONNA_FREQUENCY_SAMPLES = request.sionna_frequency_samples
+    config.SIONNA_LOS = request.sionna_los
+    config.SIONNA_SPECULAR_REFLECTION = request.sionna_specular_reflection
+    config.SIONNA_DIFFUSE_REFLECTION = request.sionna_diffuse_reflection
+    config.SIONNA_REFRACTION = request.sionna_refraction
+    config.SIONNA_DIFFRACTION = request.sionna_diffraction
+    config.SIONNA_EDGE_DIFFRACTION = request.sionna_edge_diffraction
+    config.CHANNEL_SNAPSHOT_INTERVAL = request.channel_snapshot_interval_ms * 1e3
+    config.CHANNEL_SNAPSHOT_DISPLACEMENT = request.channel_snapshot_displacement_m
+    config.MOBILITY_MODEL = request.mobility
+
+
+def _calibration_domain(request):
+    return {
+        "min_altitude_m": request.uav_min_altitude_m,
+        "max_altitude_m": request.uav_max_altitude_m,
+        "target_links": request.calibration_links,
+        "sampling": "uniform_free_airspace_v1",
+        "batch_nodes": 8,
+        "coverage": request.calibration_coverage,
+    }
+
+
+@app.post("/api/calibration/start", status_code=202)
+def start_calibration(request: CalibrationRequest):
+    if runtime.status in {"running", "paused", "starting", "stopping"}:
+        raise HTTPException(409, "Stop the simulation before calibrating")
+    if _scene_build_in_progress():
+        raise HTTPException(409, "Wait for the current scene build to finish")
+    try:
+        _apply_channel_settings(request)
+        calibration_runtime.start(request.model_dump())
+    except (RuntimeError, ValueError) as error:
+        raise HTTPException(409, str(error)) from error
+    return calibration_runtime.state()
+
+
+@app.get("/api/calibration/state")
+def calibration_state():
+    return calibration_runtime.state()
+
+
+@app.post("/api/calibration/profile")
+def calibration_profile(request: CalibrationRequest):
+    if runtime.status in {"running", "paused", "starting", "stopping"}:
+        raise HTTPException(409, "Calibration profiles cannot change during a simulation")
+    _apply_channel_settings(request)
+    fingerprint = profile_fingerprint(
+        request.los_a2a_model,
+        request.nlos_a2a_model,
+        _calibration_domain(request),
+    )
+    path = calibration_root() / fingerprint / "interval-table.json"
+    return {"fingerprint": fingerprint, "available": path.is_file()}
 
 
 @app.post("/api/simulation/pause")
