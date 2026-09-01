@@ -6,8 +6,9 @@ from dataclasses import dataclass
 import simpy
 
 from phy.sionna_rt import (
+    A2AChannelModel,
     HybridSionnaRtChannelModel,
-    OfflineSionnaRtChannelModel,
+    OnDemandChannelModel,
     OnlineSionnaRtChannelModel,
 )
 from utils import config
@@ -34,22 +35,34 @@ class Reception:
 
 
 class Channel:
-    def __init__(self, env, simulator, channel_trace=None):
+    def __init__(self, env, simulator):
         self.env = env
         self.simulator = simulator
         self.inboxes = {}
         self.transmissions = []
         self._identifiers = itertools.count(1)
-        if config.CHANNEL_MODE == "offline":
-            if channel_trace is None:
-                raise ValueError("Offline channel mode requires a precomputed trace")
-            self.channel_model = OfflineSionnaRtChannelModel(simulator.event_bus, channel_trace)
-        elif config.CHANNEL_MODE == "online":
+        if config.CHANNEL_MODE == "online":
             self.channel_model = OnlineSionnaRtChannelModel(simulator.event_bus)
         elif config.CHANNEL_MODE == "hybrid":
             self.channel_model = HybridSionnaRtChannelModel(
                 simulator.event_bus,
                 simulator.airspace,
+                config.LOS_A2A_MODEL,
+            )
+        elif config.CHANNEL_MODE == "a2a":
+            self.channel_model = A2AChannelModel(
+                simulator.event_bus,
+                simulator.airspace,
+                config.LOS_A2A_MODEL,
+                config.NLOS_A2A_MODEL,
+            )
+        elif config.CHANNEL_MODE == "on_demand":
+            self.channel_model = OnDemandChannelModel(
+                simulator.event_bus,
+                simulator.airspace,
+                config.LOS_A2A_MODEL,
+                config.NLOS_A2A_MODEL,
+                config.CALIBRATION_PROFILE,
             )
         else:
             raise ValueError(f"Unsupported channel mode: {config.CHANNEL_MODE}")
@@ -106,8 +119,28 @@ class Channel:
     def _channel_overlaps(self, first_channel, second_channel):
         return abs(first_channel - second_channel) < 5
 
+    def _estimates(self, transmitter_ids, receiver_id):
+        return self.channel_model.estimates(
+            self.env.now,
+            self.simulator.drones,
+            transmitter_ids,
+            [receiver_id],
+        )
+
+    @staticmethod
+    def _crosses_zero(lower, upper):
+        return lower < 0 <= upper
+
+    def _resolve_if_needed(self, lower, upper, pairs):
+        if not self._crosses_zero(lower, upper):
+            return False
+        resolver = getattr(self.channel_model, "resolve_rt", None)
+        if resolver is None:
+            return False
+        resolver(self.env.now, self.simulator.drones, pairs)
+        return True
+
     def _evaluate(self, target, receiver_id):
-        drones = self.simulator.drones
         target_duration = target.end_time - target.start_time
         overlapping = []
         for candidate in self.transmissions:
@@ -121,8 +154,28 @@ class Channel:
             overlapping.append((candidate, overlap / target_duration))
         transmitter_ids = [target.transmitter_id]
         transmitter_ids.extend(candidate.transmitter_id for candidate, _ in overlapping)
-        gains = self.channel_model.gains(self.env.now, drones, transmitter_ids, [receiver_id])
-        desired_gain = gains[(target.transmitter_id, receiver_id)]
+        estimates = self._estimates(transmitter_ids, receiver_id)
+        desired_pair = (target.transmitter_id, receiver_id)
+        desired = estimates[desired_pair]
+        beta = 10 ** (config.SINR_THRESHOLD_DB / 10)
+        lower_margin = target.power_watt * desired.lower - beta * config.noise_power_watt()
+        upper_margin = target.power_watt * desired.upper - beta * config.noise_power_watt()
+        relevant_pairs = [desired_pair]
+        for candidate, overlap_ratio in overlapping:
+            if candidate.transmitter_id == receiver_id:
+                lower_gain = upper_gain = 1.0
+            else:
+                pair = (candidate.transmitter_id, receiver_id)
+                relevant_pairs.append(pair)
+                estimate = estimates[pair]
+                lower_gain, upper_gain = estimate.lower, estimate.upper
+            coefficient = beta * candidate.power_watt * overlap_ratio
+            lower_margin -= coefficient * upper_gain
+            upper_margin -= coefficient * lower_gain
+        if self._resolve_if_needed(lower_margin, upper_margin, relevant_pairs):
+            estimates = self._estimates(transmitter_ids, receiver_id)
+            desired = estimates[desired_pair]
+        desired_gain = desired.nominal
         signal_power = target.power_watt * desired_gain
         interference_power = 0.0
         interferers = []
@@ -130,7 +183,7 @@ class Channel:
             gain = (
                 1.0
                 if candidate.transmitter_id == receiver_id
-                else gains[(candidate.transmitter_id, receiver_id)]
+                else estimates[(candidate.transmitter_id, receiver_id)].nominal
             )
             contribution = candidate.power_watt * gain * overlap_ratio
             interference_power += contribution
@@ -187,16 +240,25 @@ class Channel:
         ]
         if not transmissions:
             return False
-        gains = self.channel_model.gains(
-            self.env.now,
-            self.simulator.drones,
-            [transmission.transmitter_id for transmission in transmissions],
-            [drone.identifier],
-        )
-        sensed_power = 0.0
+        transmitter_ids = [transmission.transmitter_id for transmission in transmissions]
+        estimates = self._estimates(transmitter_ids, drone.identifier)
+        sensed_power = lower_power = upper_power = 0.0
+        pairs = []
         for transmission in transmissions:
-            gain = gains[(transmission.transmitter_id, drone.identifier)]
-            sensed_power += transmission.power_watt * gain
+            pair = (transmission.transmitter_id, drone.identifier)
+            pairs.append(pair)
+            estimate = estimates[pair]
+            sensed_power += transmission.power_watt * estimate.nominal
+            lower_power += transmission.power_watt * estimate.lower
+            upper_power += transmission.power_watt * estimate.upper
+        threshold = 10 ** ((config.CCA_THRESHOLD_DBM - 30) / 10)
+        if self._resolve_if_needed(lower_power - threshold, upper_power - threshold, pairs):
+            estimates = self._estimates(transmitter_ids, drone.identifier)
+            sensed_power = sum(
+                transmission.power_watt
+                * estimates[(transmission.transmitter_id, drone.identifier)].nominal
+                for transmission in transmissions
+            )
         return self._dbm(sensed_power) >= config.CCA_THRESHOLD_DBM
 
     def point_to_point_sinr(self, receiver_id, transmitter_id, channel_id):
@@ -206,17 +268,33 @@ class Channel:
         ]
         transmitter_ids = [transmitter_id]
         transmitter_ids.extend(transmission.transmitter_id for transmission in transmissions)
-        gains = self.channel_model.gains(
-            self.env.now, self.simulator.drones, transmitter_ids, [receiver_id]
-        )
-        gain = gains[(transmitter_id, receiver_id)]
+        estimates = self._estimates(transmitter_ids, receiver_id)
+        desired_pair = (transmitter_id, receiver_id)
+        desired = estimates[desired_pair]
+        beta = 10 ** (config.SINR_THRESHOLD_DB / 10)
+        lower_margin = config.TRANSMITTING_POWER * desired.lower - beta * config.noise_power_watt()
+        upper_margin = config.TRANSMITTING_POWER * desired.upper - beta * config.noise_power_watt()
+        pairs = [desired_pair]
+        for transmission in transmissions:
+            if transmission.transmitter_id == receiver_id:
+                lower_gain = upper_gain = 1.0
+            else:
+                pair = (transmission.transmitter_id, receiver_id)
+                pairs.append(pair)
+                estimate = estimates[pair]
+                lower_gain, upper_gain = estimate.lower, estimate.upper
+            lower_margin -= beta * transmission.power_watt * upper_gain
+            upper_margin -= beta * transmission.power_watt * lower_gain
+        if self._resolve_if_needed(lower_margin, upper_margin, pairs):
+            estimates = self._estimates(transmitter_ids, receiver_id)
+        gain = estimates[desired_pair].nominal
         signal = config.TRANSMITTING_POWER * gain
         interference = 0.0
         for transmission in transmissions:
             other_gain = (
                 1.0
                 if transmission.transmitter_id == receiver_id
-                else gains[(transmission.transmitter_id, receiver_id)]
+                else estimates[(transmission.transmitter_id, receiver_id)].nominal
             )
             interference += transmission.power_watt * other_gain
         if signal <= 0:

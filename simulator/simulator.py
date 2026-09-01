@@ -24,8 +24,7 @@ class Simulator:
                  action_queue=None,
                  obs_queue=None,
                  drone_speed=config.UAV_SPEED,
-                 trajectory_trace=None,
-                 channel_trace=None):
+                 trajectory_trace=None):
         self.env = env
         self.seed = seed
         self.total_simulation_time = total_simulation_time
@@ -49,7 +48,7 @@ class Simulator:
         config.MAP_WIDTH = self.airspace.size_y
         config.MAP_HEIGHT = self.airspace.max_height
         self.channel_states = {i: simpy.Resource(env, capacity=1) for i in range(n_drones)}
-        self.channel = Channel(self.env, self, channel_trace)
+        self.channel = Channel(self.env, self)
 
         config.reset_runtime_ids()
         start_position = start_coords.get_random_start_point_3d(seed, n_drones, self.airspace)
@@ -86,6 +85,9 @@ class Simulator:
             routing_parameters=config.ROUTING_PROTOCOL_PARAMETERS.copy(),
             sionna={
                 "channel_mode": config.CHANNEL_MODE,
+                "los_a2a_model": config.LOS_A2A_MODEL,
+                "nlos_a2a_model": config.NLOS_A2A_MODEL,
+                "calibration_profile": config.CALIBRATION_PROFILE,
                 "max_depth": config.SIONNA_MAX_DEPTH,
                 "samples_per_source": config.SIONNA_SAMPLES_PER_SOURCE,
                 "frequency_samples": config.SIONNA_FREQUENCY_SAMPLES,
