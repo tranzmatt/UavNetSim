@@ -193,6 +193,14 @@ body.is-resizing-log { cursor: row-resize; }
 .log-empty { font-size: 11.5px; }
 .timeline { font-size: 11px; }
 .segmented.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.segmented.four { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.calibration-block { display: grid; gap: 9px; padding-top: 9px; border-top: 1px solid var(--line); }
+.calibration-status { min-height: 28px; padding: 0 9px; display: flex; align-items: center; justify-content: space-between; gap: 8px; border-left: 2px solid #76534a; background: #241f1f; color: #c5a49d; font-size: 9px; }
+.calibration-status span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.calibration-status b { color: #d58b7d; font-size: 8px; }
+.calibration-status.ready { border-left-color: #47725f; background: #1d2421; color: #9fc5b4; }
+.calibration-status.ready b { color: #7fc5a6; }
+.calibration-button { width: 100%; }
 .toggle-field.disabled { opacity: 0.45; cursor: default; }
 
 @media (max-width: 980px) {

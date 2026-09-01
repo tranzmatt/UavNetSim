@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from 'react'
-import { Activity, ChevronDown, CirclePause, CirclePlay, Crosshair, Gauge, MapPinned, RadioTower, Route, Square, Terminal, Trash2, Zap } from 'lucide-react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { Activity, ChevronDown, CirclePause, CirclePlay, Crosshair, DatabaseZap, Gauge, MapPinned, RadioTower, Route, Square, Terminal, Trash2, Zap } from 'lucide-react'
 import uavNetSimLogo from './assets/uavnetsim-logo.png'
 import ScenePicker from './components/ScenePicker'
 import SceneViewport from './components/SceneViewport'
@@ -73,12 +73,11 @@ function formatEvent(event) {
   if (event.event_type === 'packet_rx_succeeded') return `RX ${data.packet_id}  ${data.sinr_db.toFixed(1)} dB`
   if (event.event_type === 'packet_rx_failed') return `DROP ${data.packet_id}  ${data.sinr_db.toFixed(1)} dB`
   if (event.event_type === 'channel_snapshot') {
-    if (data.mode === 'offline') return `TRACE snapshot  ${data.trace_index}`
+    if (data.mode === 'a2a') return `A2A snapshot  ${data.los_link_count} LoS / ${data.nlos_link_count} NLoS`
     if (data.mode === 'hybrid') return `HYBRID snapshot  ${data.los_link_count} LoS / ${data.nlos_link_count} NLoS  ${data.solve_time_ms.toFixed(0)} ms`
+    if (data.mode === 'on_demand') return `ON-DEMAND RT  ${data.link_count} links  ${data.solve_time_ms.toFixed(0)} ms`
     return `RT snapshot  ${data.solve_time_ms.toFixed(0)} ms`
   }
-  if (event.event_type === 'channel_trace_snapshot_ready') return `TRACE ${data.completed} / ${data.total}`
-  if (event.event_type === 'channel_trace_ready') return data.cache_hit ? 'TRACE CACHE LOADED' : 'TRACE READY'
   if (event.event_type === 'packet_delivered') return `DELIVERED ${data.packet_id}  ${data.delay_ms.toFixed(1)} ms`
   if (event.event_type === 'runtime_status') return `STATUS  ${String(data.status || '').toUpperCase()}`
   if (event.event_type === 'simulation_failed') return data.error || 'SIMULATION FAILED'
@@ -95,7 +94,7 @@ function eventTone(event) {
 export default function App() {
   const [mode, setMode] = useState('network')
   const [scene, setScene] = useState(null)
-  const [options, setOptions] = useState({ routing: [], routing_parameters: {}, mac: [], mobility: [], traffic_pattern: [], channel_mode: [] })
+  const [options, setOptions] = useState({ routing: [], routing_parameters: {}, mac: [], mobility: [], traffic_pattern: [], channel_mode: [], los_a2a_model: [], nlos_a2a_model: [] })
   const [planners, setPlanners] = useState([])
   const [state, setState] = useState({ status: 'idle', nodes: [], metrics: EMPTY_METRICS, sim_time_us: 0, duration_us: 20e6 })
   const [events, setEvents] = useState([])
@@ -108,6 +107,8 @@ export default function App() {
   const [planningResult, setPlanningResult] = useState(null)
   const [planningStatus, setPlanningStatus] = useState('idle')
   const [planningLog, setPlanningLog] = useState([])
+  const [calibration, setCalibration] = useState({ status: 'idle', progress: 0 })
+  const [profileAvailable, setProfileAvailable] = useState(false)
   const [panelLayout, setPanelLayout] = useState(DEFAULT_LAYOUT)
   const [settings, setSettings] = useState({
     seed: 2025, node_count: 8, duration_seconds: 20, playback_speed: 1, uav_speed_mps: 10,
@@ -115,10 +116,12 @@ export default function App() {
     initial_energy_j: 20000, traffic_pattern: 'Poisson', packet_arrival_rate: 5,
     routing: 'Greedy', routing_parameter_values: {}, mac: 'CSMA_CA', mobility: 'GaussMarkov3D',
     channel_mode: 'online',
+    los_a2a_model: 'free_space', nlos_a2a_model: 'urban', calibration_profile: null,
     samples_per_source: 100000, sionna_max_depth: 4, sionna_frequency_samples: 32,
     sionna_los: true, sionna_specular_reflection: true, sionna_diffuse_reflection: false,
     sionna_refraction: false, sionna_diffraction: false, sionna_edge_diffraction: false,
     channel_snapshot_interval_ms: 100, channel_snapshot_displacement_m: 1,
+    calibration_links: 5000, calibration_coverage: 0.95,
   })
   const [planningSettings, setPlanningSettings] = useState({
     planner_id: 'astar_3d', start: { x: 90, y: 90, z: 60 }, goal: { x: 510, y: 510, z: 60 },
@@ -129,6 +132,7 @@ export default function App() {
   const logStreamRef = useRef()
   const workspaceRef = useRef()
   const resizeCleanupRef = useRef()
+  const calibrationRequest = useMemo(() => ({ ...settings }), [settings])
 
   useEffect(() => {
     Promise.all([fetch('/api/scene').then((response) => response.json()), fetch('/api/options').then((response) => response.json()), fetch('/api/planners').then((response) => response.json())])
@@ -157,6 +161,41 @@ export default function App() {
   }, [scene])
 
   useEffect(() => () => resizeCleanupRef.current?.(), [])
+
+  useEffect(() => {
+    if (!scene || calibrationRequest.channel_mode !== 'on_demand') return
+    const timer = window.setTimeout(async () => {
+      try {
+        const response = await fetch('/api/calibration/profile', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(calibrationRequest),
+        })
+        if (!response.ok) throw await responseError(response)
+        const profile = await response.json()
+        setProfileAvailable(profile.available)
+        setSettings((current) => current.calibration_profile === (profile.available ? profile.fingerprint : null)
+          ? current : { ...current, calibration_profile: profile.available ? profile.fingerprint : null })
+      } catch (requestError) {
+        setProfileAvailable(false)
+        setError(requestError.message)
+      }
+    }, 300)
+    return () => window.clearTimeout(timer)
+  }, [scene, calibrationRequest])
+
+  useEffect(() => {
+    if (!['queued', 'running'].includes(calibration.status)) return
+    const timer = window.setInterval(async () => {
+      const response = await fetch('/api/calibration/state')
+      const next = await response.json()
+      setCalibration(next)
+      if (next.status === 'completed') {
+        setProfileAvailable(true)
+        setSettings((current) => ({ ...current, calibration_profile: next.profile.fingerprint }))
+      }
+      if (next.status === 'failed') setError(next.error)
+    }, 600)
+    return () => window.clearInterval(timer)
+  }, [calibration.status])
 
   useEffect(() => {
     const stream = logStreamRef.current
@@ -254,6 +293,21 @@ export default function App() {
     }
   }
 
+  async function startCalibration() {
+    setError('')
+    try {
+      const response = await fetch('/api/calibration/start', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(settings),
+      })
+      if (!response.ok) throw await responseError(response)
+      setCalibration(await response.json())
+      setProfileAvailable(false)
+      setSettings((current) => ({ ...current, calibration_profile: null }))
+    } catch (requestError) {
+      setError(requestError.message)
+    }
+  }
+
   async function planTrajectory() {
     setError('')
     setPlanningStatus('planning')
@@ -295,10 +349,9 @@ export default function App() {
   const selected = state.nodes.find((node) => node.id === selectedNode)
   const selectedSpeed = selected ? Math.hypot(...selected.velocity) : 0
   const simulationProgress = Math.min(100, (state.sim_time_us || 0) / (state.duration_us || settings.duration_seconds * 1e6) * 100)
-  const traceProgress = state.preparation?.total ? state.preparation.completed / state.preparation.total * 100 : 0
-  const progress = state.status === 'preparing' ? traceProgress : simulationProgress
-  const statusLabel = state.status === 'starting' ? 'initializing RT' : state.status === 'preparing' ? 'building trace' : state.status
-  const statusValue = state.status === 'preparing' ? `${traceProgress.toFixed(0)}%` : `${((state.sim_time_us || 0) / 1e6).toFixed(2)} s`
+  const progress = simulationProgress
+  const statusLabel = state.status === 'starting' ? 'initializing channel' : state.status
+  const statusValue = `${((state.sim_time_us || 0) / 1e6).toFixed(2)} s`
   const latestLink = events.findLast((event) => event.event_type.startsWith('packet_rx_'))
   const buildings = scene?.features.filter((feature) => feature.category === 'building').length || 0
   const terrainRelief = scene?.terrain ? Math.max(0, ...scene.terrain.vertices.map((point) => point.z)) : 0
@@ -403,7 +456,7 @@ export default function App() {
             <button type="button" className={mode === 'planning' ? 'active' : ''} disabled={settingsLocked} onClick={() => setMode('planning')}>Trajectory</button>
           </div>
           {mode === 'network' && <>
-            <button className="primary-button" disabled={ACTIVE_STATUSES.includes(state.status)} onClick={startSimulation}><CirclePlay size={17} /> Run</button>
+            <button className="primary-button" disabled={ACTIVE_STATUSES.includes(state.status) || (settings.channel_mode === 'on_demand' && !profileAvailable)} onClick={startSimulation}><CirclePlay size={17} /> Run</button>
             <button className="icon-button" title={state.status === 'paused' ? 'Resume simulation' : 'Pause simulation'} disabled={!['running', 'paused'].includes(state.status)} onClick={() => command(state.status === 'paused' ? '/api/simulation/resume' : '/api/simulation/pause')}>{state.status === 'paused' ? <CirclePlay size={18} /> : <CirclePause size={18} />}</button>
             <button className="icon-button" title="Stop simulation" disabled={!['running', 'paused', 'starting', 'preparing'].includes(state.status)} onClick={() => command('/api/simulation/stop')}><Square size={16} /></button>
           </>}
@@ -458,18 +511,24 @@ export default function App() {
             </LayerSection>
 
             <LayerSection index="05" title="PHYSICAL LAYER" open={openLayers.physical} disabled={settingsLocked} onToggle={() => toggleLayer('physical')}>
-              <Field label="Channel calculation"><div className="segmented three">{options.channel_mode.map((mode) => <button type="button" key={mode} className={settings.channel_mode === mode ? 'active' : ''} onClick={() => setSetting('channel_mode', mode)}>{mode}</button>)}</div></Field>
-              <div className="field-row"><Field label="Max depth"><input type="number" min="0" max="32" value={settings.sionna_max_depth} onChange={(event) => setSetting('sionna_max_depth', Number(event.target.value))} /></Field><Field label="Samples / source"><input type="number" min="100" max="10000000" step="1000" value={settings.samples_per_source} onChange={(event) => setSetting('samples_per_source', Number(event.target.value))} /></Field></div>
-              <div className="field-row"><Field label="Frequency samples"><input type="number" min="1" max="4096" value={settings.sionna_frequency_samples} onChange={(event) => setSetting('sionna_frequency_samples', Number(event.target.value))} /></Field><Field label="Snapshot interval"><div className="input-unit"><input type="number" min="0.1" max="60000" step="1" value={settings.channel_snapshot_interval_ms} onChange={(event) => setSetting('channel_snapshot_interval_ms', Number(event.target.value))} /><span>ms</span></div></Field></div>
-              <Field label="Snapshot displacement"><div className="input-unit"><input type="number" min="0.01" max="1000" step="0.1" value={settings.channel_snapshot_displacement_m} onChange={(event) => setSetting('channel_snapshot_displacement_m', Number(event.target.value))} /><span>m</span></div></Field>
-              <div className="toggle-grid">
-                <Toggle label="Line of sight" checked={settings.channel_mode === 'hybrid' || settings.sionna_los} disabled={settings.channel_mode === 'hybrid'} onChange={(value) => setSetting('sionna_los', value)} />
+              <Field label="Channel calculation"><div className="segmented four">{options.channel_mode.map((channelMode) => <button type="button" key={channelMode} className={settings.channel_mode === channelMode ? 'active' : ''} onClick={() => setSetting('channel_mode', channelMode)}>{channelMode === 'on_demand' ? 'on-demand' : channelMode}</button>)}</div></Field>
+              {settings.channel_mode !== 'online' && <div className={settings.channel_mode === 'hybrid' ? '' : 'field-row'}><Field label="LoS A2A model"><select value={settings.los_a2a_model} onChange={(event) => setSetting('los_a2a_model', event.target.value)}>{options.los_a2a_model.map((item) => <option key={item} value={item}>{item.replaceAll('_', ' ')}</option>)}</select></Field>{settings.channel_mode !== 'hybrid' && <Field label="NLoS A2A model"><select value={settings.nlos_a2a_model} onChange={(event) => setSetting('nlos_a2a_model', event.target.value)}>{options.nlos_a2a_model.map((item) => <option key={item} value={item}>{item}</option>)}</select></Field>}</div>}
+              {settings.channel_mode !== 'a2a' && <><div className="field-row"><Field label="Max depth"><input type="number" min="0" max="32" value={settings.sionna_max_depth} onChange={(event) => setSetting('sionna_max_depth', Number(event.target.value))} /></Field><Field label="Samples / source"><input type="number" min="100" max="10000000" step="1000" value={settings.samples_per_source} onChange={(event) => setSetting('samples_per_source', Number(event.target.value))} /></Field></div>
+              <Field label="Frequency samples"><input type="number" min="1" max="4096" value={settings.sionna_frequency_samples} onChange={(event) => setSetting('sionna_frequency_samples', Number(event.target.value))} /></Field></>}
+              <div className="field-row"><Field label="Snapshot interval"><div className="input-unit"><input type="number" min="0.1" max="60000" step="1" value={settings.channel_snapshot_interval_ms} onChange={(event) => setSetting('channel_snapshot_interval_ms', Number(event.target.value))} /><span>ms</span></div></Field><Field label="Snapshot displacement"><div className="input-unit"><input type="number" min="0.01" max="1000" step="0.1" value={settings.channel_snapshot_displacement_m} onChange={(event) => setSetting('channel_snapshot_displacement_m', Number(event.target.value))} /><span>m</span></div></Field></div>
+              {settings.channel_mode !== 'a2a' && <div className="toggle-grid">
+                <Toggle label="Line of sight" checked={settings.sionna_los} onChange={(value) => setSetting('sionna_los', value)} />
                 <Toggle label="Specular reflection" checked={settings.sionna_specular_reflection} onChange={(value) => setSetting('sionna_specular_reflection', value)} />
                 <Toggle label="Diffuse reflection" checked={settings.sionna_diffuse_reflection} onChange={(value) => setSetting('sionna_diffuse_reflection', value)} />
                 <Toggle label="Refraction" checked={settings.sionna_refraction} onChange={(value) => setSetting('sionna_refraction', value)} />
                 <Toggle label="Diffraction" checked={settings.sionna_diffraction} onChange={(value) => setSetting('sionna_diffraction', value)} />
                 <Toggle label="Edge diffraction" checked={settings.sionna_edge_diffraction} onChange={(value) => setSetting('sionna_edge_diffraction', value)} />
-              </div>
+              </div>}
+              {settings.channel_mode === 'on_demand' && <div className="calibration-block">
+                <div className="field-row"><Field label="Sample links"><input type="number" min="100" max="1000000" step="100" value={settings.calibration_links} onChange={(event) => setSetting('calibration_links', Number(event.target.value))} /></Field><Field label="Interval coverage"><div className="input-unit"><input type="number" min="0.8" max="0.999" step="0.01" value={settings.calibration_coverage} onChange={(event) => setSetting('calibration_coverage', Number(event.target.value))} /><span>ratio</span></div></Field></div>
+                <div className={`calibration-status ${profileAvailable ? 'ready' : ''}`}><span>{['queued', 'running'].includes(calibration.status) ? calibration.stage : profileAvailable ? 'Matching profile ready' : 'Calibration required'}</span><b>{['queued', 'running'].includes(calibration.status) ? `${calibration.progress}%` : profileAvailable ? 'READY' : 'MISSING'}</b></div>
+                <button type="button" className="secondary-button calibration-button" disabled={['queued', 'running'].includes(calibration.status)} onClick={startCalibration}><DatabaseZap size={16} /> Calibrate</button>
+              </div>}
             </LayerSection>
             </> : <PlanningControls
               planners={planners}
